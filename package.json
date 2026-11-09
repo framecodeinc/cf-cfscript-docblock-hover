@@ -1,0 +1,37 @@
+{
+  "name": "cf-cfscript-docblock-hover",
+  "displayName": "ColdFusion CFScript DocBlock Hover",
+  "description": "Shows the docblock documentation (/** ... */) of CFScript functions on hover, in .cfc and in <cfscript> blocks of .cfm files",
+  "version": "1.0.0",
+  "publisher": "local",
+  "license": "MIT",
+  "engines": { "vscode": "^1.80.0" },
+  "categories": ["Programming Languages", "Other"],
+  "keywords": ["cfml", "coldfusion", "cfscript", "cfc", "docblock", "hover", "documentation"],
+  "main": "./out/extension.js",
+  "activationEvents": [
+    "onLanguage:cfml",
+    "workspaceContains:**/*.cfc"
+  ],
+  "contributes": {
+    "languages": [
+      {
+        "id": "cfml",
+        "aliases": ["CFML", "ColdFusion"],
+        "extensions": [".cfc", ".cfm", ".cfml"]
+      }
+    ]
+  },
+  "scripts": {
+    "vscode:prepublish": "npm run compile",
+    "compile": "tsc -p ./",
+    "watch": "tsc -watch -p ./",
+    "package": "vsce package --allow-missing-repository"
+  },
+  "devDependencies": {
+    "@types/node": "18.x",
+    "@types/vscode": "^1.80.0",
+    "@vscode/vsce": "^3.0.0",
+    "typescript": "^5.4.0"
+  }
+}
