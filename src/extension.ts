@@ -1,4 +1,5 @@
 import * as vscode from 'vscode';
+import * as https from 'https';
 
 // ---------------------------------------------------------------------------
 // Tipos
@@ -56,9 +57,9 @@ interface IndexEntry {
 // Ámbitos que pueden compartirse entre archivos / estar fuera de funciones
 const SHARED_SCOPES = ['variables', 'this', 'application', 'session', 'request', 'server'];
 // Ámbitos en los que se detectan asignaciones: x.nombre = valor
-const ASSIGN_SCOPES = [...SHARED_SCOPES, 'local'];
+const ASSIGN_SCOPES = [...SHARED_SCOPES, 'local', 'url', 'form', 'cookie', 'client'];
 // Ámbitos sobre los que se muestra hover: x.nombre
-const HOVER_SCOPES = [...ASSIGN_SCOPES, 'arguments'];
+const HOVER_SCOPES = [...ASSIGN_SCOPES, 'arguments', 'cgi'];
 
 // ---------------------------------------------------------------------------
 // Funciones: docblock + firma
@@ -732,6 +733,277 @@ function toMarkdownComponent(e: IndexEntry, fileLabel?: string): vscode.Markdown
 }
 
 // ---------------------------------------------------------------------------
+// Ámbitos nativos (url, form, cgi...): descripciones breves propias de la extensión
+// ---------------------------------------------------------------------------
+const SCOPE_INFO = new Map<string, string>([
+  ['url', 'Parameters passed in the URL query string of the current request.'],
+  ['form', 'Fields submitted by an HTML form using the POST method.'],
+  ['cgi', 'Read-only variables provided by the web server and the current request.'],
+  ['cookie', 'Cookies sent by the browser with the current request.'],
+  ['client', 'Client variables persisted between requests for each visitor (requires clientManagement).'],
+  ['session', 'Data kept for each visitor session (requires sessionManagement).'],
+  ['application', 'Data shared by all requests of the application.'],
+  ['server', 'Data shared by all applications of the CFML server instance.'],
+  ['request', 'Data available during a single request, across pages, custom tags and components.'],
+  ['variables', 'Default scope of a page, and private scope of a component.'],
+  ['this', 'Public scope of a component instance (also used for settings in Application.cfc).'],
+  ['local', 'Variables local to the current function.'],
+  ['arguments', 'Arguments passed to the current function.']
+]);
+
+const CGI_VARS = new Map<string, string>([
+  ['http_host', 'Host name (and port) requested by the client.'],
+  ['server_name', 'Host name of the server.'],
+  ['server_port', 'Port on which the request was received.'],
+  ['server_port_secure', '1 if the request was made over HTTPS, otherwise 0.'],
+  ['server_protocol', 'Name and version of the protocol of the request (e.g. HTTP/1.1).'],
+  ['server_software', 'Name and version of the web server software.'],
+  ['https', '"on" if the request was made over HTTPS, otherwise "off".'],
+  ['remote_addr', 'IP address of the client (or of the last proxy).'],
+  ['remote_host', 'Host name of the client, when available.'],
+  ['remote_user', 'Authenticated user name, if any.'],
+  ['request_method', 'HTTP method of the request (GET, POST, ...).'],
+  ['query_string', 'Query string of the request (the part after the "?").'],
+  ['script_name', 'Virtual path of the template being executed.'],
+  ['path_info', 'Extra path information that follows the script name.'],
+  ['path_translated', 'File-system path of the requested resource.'],
+  ['context_path', 'Context path of the web application.'],
+  ['content_type', 'Content type of the request body.'],
+  ['content_length', 'Length in bytes of the request body.'],
+  ['http_user_agent', 'User-Agent header sent by the browser.'],
+  ['http_referer', 'URL of the page that linked to the current one.'],
+  ['http_accept_language', 'Languages accepted by the client (Accept-Language header).'],
+  ['http_cookie', 'Raw Cookie header sent by the client.'],
+  ['http_x_forwarded_for', 'Client IP behind proxies or load balancers. Can be spoofed by the client.']
+]);
+
+// Sentencias de cfscript que equivalen a un tag (include "x.cfm"; location(url="x"); param name="x"; ...)
+const SCRIPT_STATEMENTS = new Map<string, string>([
+  ['include', 'cfinclude'],
+  ['abort', 'cfabort'],
+  ['exit', 'cfexit'],
+  ['location', 'cflocation'],
+  ['lock', 'cflock'],
+  ['param', 'cfparam'],
+  ['savecontent', 'cfsavecontent'],
+  ['thread', 'cfthread'],
+  ['throw', 'cfthrow'],
+  ['rethrow', 'cfrethrow'],
+  ['transaction', 'cftransaction'],
+  ['import', 'cfimport']
+]);
+const SCRIPT_ALT = [...SCRIPT_STATEMENTS.keys()].join('|');
+
+const SCOPES_URL = 'https://cfdocs.org/scopes';
+
+function toMarkdownScope(scope: string): vscode.MarkdownString {
+  const md = new vscode.MarkdownString();
+  md.appendCodeblock(`(scope) ${scope}`, codeLanguage());
+  md.appendMarkdown((SCOPE_INFO.get(scope) || '') + '\n');
+  md.appendMarkdown(`\n---\n*Scopes:* [cfdocs.org/scopes](${SCOPES_URL})`);
+  return md;
+}
+
+/** Hover de un miembro de un ámbito de petición: url.page, form.nombre, cgi.http_host ... */
+export function nativeScopeMember(scope: string, name: string): vscode.MarkdownString | undefined {
+  let desc: string | undefined;
+  switch (scope) {
+    case 'cgi': desc = CGI_VARS.get(name.toLowerCase()) ?? 'Variable provided by the web server for this request.'; break;
+    case 'url': desc = 'Parameter received in the URL query string. Its value comes from the request.'; break;
+    case 'form': desc = 'Field submitted by an HTML form (POST). Its value comes from the request.'; break;
+    case 'cookie': desc = 'Cookie sent by the browser with this request.'; break;
+    case 'client': desc = 'Client variable persisted between requests (requires clientManagement).'; break;
+    default: return undefined;
+  }
+  const md = new vscode.MarkdownString();
+  md.appendCodeblock(`(${scope}) ${name}`, codeLanguage());
+  md.appendMarkdown(desc + '\n');
+  md.appendMarkdown(`\n---\n*Scopes:* [cfdocs.org/scopes](${SCOPES_URL})`);
+  return md;
+}
+
+// ---------------------------------------------------------------------------
+// Funciones y tags nativos de CFML: consulta en línea a CFDocs (sin empaquetar los datos)
+// ---------------------------------------------------------------------------
+interface CfDocsParam {
+  name: string;
+  description?: string;
+  required?: boolean;
+  default?: unknown;
+  type?: string;
+  values?: unknown[];
+}
+
+interface CfDocsEntry {
+  name: string;
+  type?: string; // function | tag
+  syntax?: string;
+  script?: string;
+  member?: string;
+  returns?: string;
+  description?: string;
+  discouraged?: string;
+  params?: CfDocsParam[];
+  engines?: Record<string, { minimum_version?: string; notes?: string; docs?: string }>;
+}
+
+const CFDOCS_DEFAULT_BASE = 'https://raw.githubusercontent.com/foundeo/cfdocs/master/data/en/';
+const DAY_MS = 86400000;
+const NOT_FUNCTIONS = new Set([
+  'if', 'else', 'elseif', 'for', 'while', 'do', 'switch', 'case', 'catch', 'try', 'finally',
+  'function', 'return', 'new', 'throw', 'and', 'or', 'not', 'in', 'is', 'eq', 'neq', 'lt', 'gt', 'lte', 'gte'
+]);
+
+let storage: vscode.Memento | undefined;
+let offlineUntil = 0;
+const cfdocsMemory = new Map<string, Promise<CfDocsEntry | null>>();
+
+function cfdocsSettings(): { enabled: boolean; base: string } {
+  const cfg = vscode.workspace.getConfiguration('cfscriptDocblockHover');
+  const base = cfg.get<string>('cfdocs.baseUrl', CFDOCS_DEFAULT_BASE);
+  return {
+    enabled: cfg.get<boolean>('cfdocs.enabled', true),
+    base: base.endsWith('/') ? base : base + '/'
+  };
+}
+
+function httpGet(url: string, timeoutMs = 4000): Promise<{ status: number; body: string }> {
+  return new Promise((resolve, reject) => {
+    const req = https.get(url, { headers: { 'User-Agent': 'cf-cfscript-docblock-hover' } }, res => {
+      let body = '';
+      res.setEncoding('utf8');
+      res.on('data', (c: string) => { body += c; });
+      res.on('end', () => resolve({ status: res.statusCode ?? 0, body }));
+    });
+    req.setTimeout(timeoutMs, () => req.destroy(new Error('timeout')));
+    req.on('error', reject);
+  });
+}
+
+/** JSON.parse tolerante a comas finales (algunos archivos de CFDocs las tienen). */
+export function parseJsonLoose(text: string): unknown {
+  try {
+    return JSON.parse(text);
+  } catch {
+    return JSON.parse(text.replace(/,(\s*[}\]])/g, '$1'));
+  }
+}
+
+async function loadCfDocs(key: string): Promise<CfDocsEntry | null> {
+  const storeKey = `cfdocs.v1.${key}`;
+  const cached = storage?.get<{ t: number; d: CfDocsEntry | null }>(storeKey);
+  if (cached && Date.now() - cached.t < (cached.d ? 7 : 1) * DAY_MS) { return cached.d; }
+  if (Date.now() < offlineUntil) { cfdocsMemory.delete(key); return null; }
+
+  try {
+    const res = await httpGet(`${cfdocsSettings().base}${key}.json`);
+    if (res.status === 200) {
+      const d = parseJsonLoose(res.body) as CfDocsEntry;
+      d.name = d.name || key;
+      await storage?.update(storeKey, { t: Date.now(), d });
+      return d;
+    }
+    if (res.status === 404) {
+      await storage?.update(storeKey, { t: Date.now(), d: null });
+      return null;
+    }
+  } catch {
+    offlineUntil = Date.now() + 60000; // sin red o respuesta inválida: no insistir durante 1 minuto
+  }
+  cfdocsMemory.delete(key); // no se guarda: se reintentará más tarde
+  return null;
+}
+
+async function getCfDocs(name: string): Promise<CfDocsEntry | null> {
+  const key = name.toLowerCase();
+  if (!/^[a-z0-9_]+$/.test(key)) { return null; }
+  let p = cfdocsMemory.get(key);
+  if (!p) {
+    p = loadCfDocs(key);
+    cfdocsMemory.set(key, p);
+  }
+  return p;
+}
+
+function oneLine(s: string | undefined, max = 240): string {
+  const t = (s || '').replace(/\s+/g, ' ').trim();
+  return t.length > max ? t.slice(0, max - 1) + '…' : t;
+}
+
+function cfdocsDefault(d: unknown): string | undefined {
+  if (d === undefined || d === null || d === '') { return undefined; }
+  return typeof d === 'string' ? quoteAttr(d) : String(d);
+}
+
+function cfdocsParamLine(p: CfDocsParam): string {
+  const def = cfdocsDefault(p.default);
+  const optional = !p.required && def === undefined;
+  return `${p.name}${optional ? '?' : ''}: ${p.type || 'any'}${def !== undefined ? ` = ${def}` : ''}`;
+}
+
+/** Firma al estilo TypeScript: function arrayAppend(array: array, value: any, merge?: boolean): boolean */
+export function cfdocsSignature(e: CfDocsEntry): string {
+  return `function ${e.name}(${(e.params ?? []).map(cfdocsParamLine).join(', ')}): ${e.returns || 'void'}`;
+}
+
+function cfdocsEngines(e: CfDocsEntry): string {
+  const engines = (e.engines ?? {}) as Record<string, { minimum_version?: string } | undefined>;
+  const labels: Record<string, string> = { coldfusion: 'ColdFusion', lucee: 'Lucee', boxlang: 'BoxLang' };
+  const wanted = vscode.workspace
+    .getConfiguration('cfscriptDocblockHover')
+    .get<string[]>('cfdocs.engines', ['coldfusion', 'lucee', 'boxlang'])
+    .map(x => x.toLowerCase());
+  return Object.keys(labels)
+    .filter(k => wanted.includes(k) && engines[k])
+    .map(k => `${labels[k]}${engines[k]?.minimum_version ? ` ${engines[k]?.minimum_version}+` : ''}`)
+    .join(' · ');
+}
+
+function cfdocsFooter(md: vscode.MarkdownString, e: CfDocsEntry): void {
+  const engines = cfdocsEngines(e);
+  const url = `https://cfdocs.org/${e.name.toLowerCase()}`;
+  md.appendMarkdown(`\n---\n${engines ? `*${engines}* · ` : ''}*CFDocs:* [${url.replace('https://', '')}](${url})`);
+}
+
+function toMarkdownCfDocs(e: CfDocsEntry, scriptForm = false): vscode.MarkdownString {
+  const md = new vscode.MarkdownString();
+  const isTag = e.type === 'tag';
+  if (isTag && scriptForm && e.script) {
+    md.appendCodeblock(e.script, codeLanguage());
+  } else if (isTag) {
+    md.appendCodeblock(e.syntax || `<${e.name}>`, 'html');
+  } else {
+    md.appendCodeblock(cfdocsSignature(e), codeLanguage());
+  }
+  if (e.discouraged) { md.appendMarkdown(`⚠️ *Discouraged:* ${oneLine(e.discouraged)}\n\n`); }
+  if (e.description) { md.appendMarkdown(oneLine(e.description, 400) + '\n'); }
+  if (!isTag && e.member) { md.appendMarkdown(`\n*member:* \`${e.member}\`\n`); }
+
+  const params = e.params ?? [];
+  const shown = params.slice(0, isTag ? 15 : 10);
+  for (const p of shown) {
+    const meta = [p.type, p.required ? 'required' : ''].filter(Boolean).join(', ');
+    md.appendMarkdown(`\n*${isTag ? '@attr' : '@param'}* \`${p.name}\`${meta ? ` *(${meta})*` : ''}${p.description ? ` — ${oneLine(p.description)}` : ''}\n`);
+  }
+  if (params.length > shown.length) { md.appendMarkdown(`\n*… +${params.length - shown.length} more*\n`); }
+  if (!isTag && e.returns && e.returns !== 'void') { md.appendMarkdown(`\n*@returns* ${e.returns}\n`); }
+  cfdocsFooter(md, e);
+  return md;
+}
+
+function toMarkdownCfDocsParam(e: CfDocsEntry, p: CfDocsParam): vscode.MarkdownString {
+  const md = new vscode.MarkdownString();
+  md.appendCodeblock(`(attribute) ${cfdocsParamLine(p)}`, codeLanguage());
+  if (p.required) { md.appendMarkdown('*required*\n\n'); }
+  if (p.description) { md.appendMarkdown(oneLine(p.description, 500) + '\n'); }
+  const values = (p.values ?? []).map(String).filter(Boolean);
+  if (values.length) { md.appendMarkdown(`\n*Values:* ${values.slice(0, 12).map(v => `\`${v}\``).join(' | ')}\n`); }
+  md.appendMarkdown(`\n*attribute of* \`${e.name}\``);
+  cfdocsFooter(md, e);
+  return md;
+}
+
+// ---------------------------------------------------------------------------
 // Índice de CFCs del workspace
 // ---------------------------------------------------------------------------
 export const index = new Map<string, IndexEntry>();
@@ -763,6 +1035,7 @@ function ensureIndex(): Promise<unknown> {
 // Activación
 // ---------------------------------------------------------------------------
 export function activate(context: vscode.ExtensionContext): void {
+  storage = context.globalState;
   const watcher = vscode.workspace.createFileSystemWatcher('**/*.cfc');
   watcher.onDidChange(indexFile);
   watcher.onDidCreate(indexFile);
@@ -808,6 +1081,40 @@ export function activate(context: vscode.ExtensionContext): void {
         const before = lineText.slice(0, range.start.character);
         const fn = enclosingFunction(funcs, document.offsetAt(position));
 
+        const cfdocs = cfdocsSettings();
+
+        // T) Tags nativos: <cfhttp ...> (nombre del tag) y sus atributos (method="get")
+        if (cfdocs.enabled) {
+          const lt = before.lastIndexOf('<');
+          const seg = lt >= 0 ? before.slice(lt) : '';
+          if (lt >= 0 && !seg.includes('>')) {
+            if (/^<\/?$/.test(seg) && /^cf[a-z0-9_]*$/i.test(word)) {
+              const e = await getCfDocs(word);
+              if (e && e.type === 'tag') { return new vscode.Hover(toMarkdownCfDocs(e), range); }
+            } else {
+              const tn = seg.match(/^<(cf[a-z0-9_]+)\s/i);
+              if (tn && /^\s*=/.test(lineText.slice(range.end.character))) {
+                const e = await getCfDocs(tn[1]);
+                const p = e?.params?.find(x => x.name.toLowerCase() === word);
+                if (e && p) { return new vscode.Hover(toMarkdownCfDocsParam(e, p), range); }
+              }
+            }
+          }
+        }
+
+        // T2) Atributos de tags en cfscript: cfcontent(type="...") / cfcontent type="...";
+        if (cfdocs.enabled && /^\s*=(?!=)/.test(lineText.slice(range.end.character))) {
+          const pm = before.match(new RegExp(`(?<![.\\w])(cf[a-z0-9_]+|${SCRIPT_ALT})\\s*\\(([^()]*)$`, 'i'));
+          const sm2 = before.match(new RegExp(`(?:^|[;{}])\\s*(cf[a-z0-9_]+|${SCRIPT_ALT})\\s+([^;{}()]*)$`, 'i'));
+          const rawName = (pm ?? sm2)?.[1]?.toLowerCase();
+          const tagName = rawName ? (SCRIPT_STATEMENTS.get(rawName) ?? rawName) : undefined;
+          if (tagName) {
+            const e = await getCfDocs(tagName);
+            const p = e?.params?.find(x => x.name.toLowerCase() === word);
+            if (e && p) { return new vscode.Hover(toMarkdownCfDocsParam(e, p), range); }
+          }
+        }
+
         // A) Variable con ámbito: arguments.x, local.x, variables.x, this.x, application.x ...
         const sm = before.match(new RegExp(`\\b(${HOVER_SCOPES.join('|')})\\.$`, 'i'));
         if (sm && !isCall) {
@@ -847,7 +1154,8 @@ export function activate(context: vscode.ExtensionContext): void {
             }
             if (found.length) { return new vscode.Hover(found.slice(0, 3), range); }
           }
-          return undefined;
+          const nat = nativeScopeMember(scope, word);
+          return nat ? new vscode.Hover(nat, range) : undefined;
         }
 
         // C) Identificador suelto dentro de una función: parámetro o variable local (var / local.x)
@@ -859,6 +1167,11 @@ export function activate(context: vscode.ExtensionContext): void {
           if (lv.length) {
             return new vscode.Hover(toMarkdownVar(lv[0], lv[0].scope), range);
           }
+        }
+
+        // S) Nombre de ámbito seguido de "." o "[": url.x, form.x, cgi.x, session.x ...
+        if (!isCall && !before.endsWith('.') && SCOPE_INFO.has(word) && /^\s*[.\[]/.test(lineText.slice(range.end.character))) {
+          return new vscode.Hover(toMarkdownScope(word), range);
         }
 
         // D) Identificador suelto: variable del ámbito variables (<cfset page = ...>, page = ...;, property)
@@ -877,6 +1190,18 @@ export function activate(context: vscode.ExtensionContext): void {
             if (hits.length) {
               return new vscode.Hover(hits.slice(0, 3).map(v => toMarkdownVar(v, 'variables', rel(e.uri))), range);
             }
+          }
+        }
+
+        // Tag en cfscript: cfcontent type="text/html";  /  include "x.cfm";  /  location(url="x")
+        if (cfdocs.enabled && !before.endsWith('.')) {
+          const atStatement = /(?:^|[;{}])\s*$/.test(before) && !/^\s*=(?!=)/.test(lineText.slice(range.end.character));
+          const isUserFn = funcs.some(f => f.name.toLowerCase() === word);
+          const stmt = atStatement && !isUserFn ? SCRIPT_STATEMENTS.get(word) : undefined;
+          const tagName = stmt ?? (!isCall && /^cf[a-z0-9_]+$/.test(word) ? word : undefined);
+          if (tagName) {
+            const e = await getCfDocs(tagName);
+            if (e && e.type === 'tag') { return new vscode.Hover(toMarkdownCfDocs(e, true), range); }
           }
         }
 
@@ -916,7 +1241,14 @@ export function activate(context: vscode.ExtensionContext): void {
             }
           }
         }
-        return found.length ? new vscode.Hover(found.slice(0, 5), range) : undefined;
+        if (found.length) { return new vscode.Hover(found.slice(0, 5), range); }
+
+        // Función nativa de CFML (CFDocs): solo si no es método de otro objeto (obj.metodo())
+        if (cfdocs.enabled && !before.endsWith('.') && !NOT_FUNCTIONS.has(word) && /^[a-z_]\w*$/.test(word)) {
+          const e = await getCfDocs(word);
+          if (e) { return new vscode.Hover(toMarkdownCfDocs(e, e.type === 'tag'), range); }
+        }
+        return undefined;
       }
     })
   );
