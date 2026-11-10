@@ -19,8 +19,29 @@
         "id": "cfml",
         "aliases": ["CFML", "ColdFusion"],
         "extensions": [".cfc", ".cfm", ".cfml"]
+      },
+      {
+        "id": "cfscript-hover",
+        "aliases": ["CFScript Hover"]
       }
-    ]
+    ],
+    "grammars": [
+      {
+        "language": "cfscript-hover",
+        "scopeName": "source.cfscript-hover",
+        "path": "./syntaxes/cfscript-hover.tmLanguage.json"
+      }
+    ],
+    "configuration": {
+      "title": "CFScript DocBlock Hover",
+      "properties": {
+        "cfscriptDocblockHover.codeLanguage": {
+          "type": "string",
+          "default": "cfscript-hover",
+          "description": "Language id used to color the code in the hover (e.g. cfscript-hover, typescript, cfml)."
+        }
+      }
+    }
   },
   "scripts": {
     "vscode:prepublish": "npm run compile",
