@@ -794,6 +794,21 @@ const SCRIPT_STATEMENTS = new Map<string, string>([
 ]);
 const SCRIPT_ALT = [...SCRIPT_STATEMENTS.keys()].join('|');
 
+// Ajustes de Application.cfc que pueden no figurar como atributos de cfapplication en CFDocs
+const APP_SETTINGS = new Map<string, string>([
+  ['mappings', 'Struct that maps logical paths to directories (e.g. { "/lib": expandPath("./lib") }), used to resolve include, createObject, new and extends.'],
+  ['customtagpaths', 'Directories (list or array) searched for custom tags.'],
+  ['datasource', 'Default datasource for queries that do not specify one.'],
+  ['datasources', 'Struct of datasource definitions available to the application.'],
+  ['javasettings', 'Java settings, such as loadPaths, to load JAR files and classes for this application.'],
+  ['restsettings', 'Settings for the REST services exposed by this application, such as cfclocation.'],
+  ['ormenabled', 'Enables ORM (Hibernate) for the application.'],
+  ['ormsettings', 'ORM configuration: datasource, cfclocation, dbcreate, and others.'],
+  ['invokeimplicitaccessor', 'Whether property getters and setters are invoked when properties are accessed with dot notation.'],
+  ['enablenullsupport', 'Enables null support, so null values are kept instead of being converted to empty strings.'],
+  ['sameformfieldsasarray', 'Returns form fields that share a name as an array instead of a comma-delimited list.']
+]);
+
 const SCOPES_URL = 'https://cfdocs.org/scopes';
 
 function toMarkdownScope(scope: string): vscode.MarkdownString {
@@ -991,6 +1006,33 @@ function toMarkdownCfDocs(e: CfDocsEntry, scriptForm = false): vscode.MarkdownSt
   return md;
 }
 
+function toMarkdownCfDocsSetting(e: CfDocsEntry, p: CfDocsParam): vscode.MarkdownString {
+  const md = new vscode.MarkdownString();
+  md.appendCodeblock(`(setting) this.${p.name}: ${p.type || 'any'}`, codeLanguage());
+  if (p.description) { md.appendMarkdown(oneLine(p.description, 500) + '\n'); }
+  const values = (p.values ?? []).map(String).filter(Boolean);
+  if (values.length) { md.appendMarkdown(`\n*Values:* ${values.slice(0, 12).map(v => `\`${v}\``).join(' | ')}\n`); }
+  md.appendMarkdown('\n*Application.cfc setting, same as the* `cfapplication` *attribute*');
+  cfdocsFooter(md, e);
+  return md;
+}
+
+/** Ajuste de aplicación (this.name, this.sessionTimeout ...) documentado como atributo de cfapplication. */
+async function getAppSetting(name: string, online: boolean): Promise<vscode.MarkdownString | undefined> {
+  if (online) {
+    const e = await getCfDocs('cfapplication');
+    const p = e?.params?.find(x => x.name.toLowerCase() === name);
+    if (e && p) { return toMarkdownCfDocsSetting(e, p); }
+  }
+  const desc = APP_SETTINGS.get(name);
+  if (!desc) { return undefined; }
+  const md = new vscode.MarkdownString();
+  md.appendCodeblock(`(setting) this.${name}`, codeLanguage());
+  md.appendMarkdown(desc + '\n');
+  md.appendMarkdown('\n---\n*Application.cfc setting* · *CFDocs:* [cfdocs.org/application](https://cfdocs.org/application)');
+  return md;
+}
+
 function toMarkdownCfDocsParam(e: CfDocsEntry, p: CfDocsParam): vscode.MarkdownString {
   const md = new vscode.MarkdownString();
   md.appendCodeblock(`(attribute) ${cfdocsParamLine(p)}`, codeLanguage());
@@ -1127,8 +1169,14 @@ export function activate(context: vscode.ExtensionContext): void {
 
           const pool = scope === 'local' ? localVarsOf(vars, fn) : vars;
           const local = pool.filter(v => varMatches(v, scope, word)).sort(byDoc);
+          const setting = scope === 'this' && uriBase(document.uri).toLowerCase() === 'application'
+            ? await getAppSetting(word, cfdocs.enabled)
+            : undefined;
           if (local.length) {
-            return new vscode.Hover(local.slice(0, 3).map(v => toMarkdownVar(v, scope)), range);
+            return new vscode.Hover(
+              [...local.slice(0, 3).map(v => toMarkdownVar(v, scope)), ...(setting ? [setting] : [])],
+              range
+            );
           }
 
           // Campos heredados de los componentes base (extends)
@@ -1140,7 +1188,7 @@ export function activate(context: vscode.ExtensionContext): void {
                 return new vscode.Hover(hits.slice(0, 3).map(v => toMarkdownVar(v, scope, rel(e.uri))), range);
               }
             }
-            return undefined;
+            return setting ? new vscode.Hover(setting, range) : undefined;
           }
 
           // Ámbitos compartidos: se pueden definir en otro CFC (p. ej. Application.cfc)

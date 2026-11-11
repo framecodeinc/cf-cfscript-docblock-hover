@@ -3,9 +3,15 @@
   "displayName": "ColdFusion CFScript DocBlock Hover",
   "description": "Shows the docblock documentation (/** ... */) of CFScript functions on hover, in .cfc and in <cfscript> blocks of .cfm files",
   "version": "1.0.0",
-  "publisher": "local",
+  "publisher": "framecode",
+  "icon": "icon.png",
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/framecodeinc/cf-cfscript-docblock-hover.git"
+  },
+
   "license": "MIT",
-  "engines": { "vscode": "^1.80.0" },
+  "engines": { "vscode": "^1.85.0" },
   "categories": ["Programming Languages", "Other"],
   "keywords": ["cfml", "coldfusion", "cfscript", "cfc", "docblock", "hover", "documentation"],
   "main": "./out/extension.js",
@@ -38,7 +44,29 @@
         "cfscriptDocblockHover.codeLanguage": {
           "type": "string",
           "default": "cfscript-hover",
-          "description": "Language id used to color the code in the hover (e.g. cfscript-hover, typescript, cfml)."
+          "description": "Language id used to color the code in the hover (e.g. cfscript-hover, typescript, javascript, cfml)."
+        },
+        "cfscriptDocblockHover.cfdocs.enabled": {
+          "type": "boolean",
+          "default": true,
+          "description": "Show documentation of native CFML functions, tags and statements fetched from CFDocs."
+        },
+        "cfscriptDocblockHover.cfdocs.baseUrl": {
+          "type": "string",
+          "default": "https://raw.githubusercontent.com/foundeo/cfdocs/master/data/en/",
+          "pattern": "^https://.+",
+          "patternErrorMessage": "Only https URLs are supported.",
+          "description": "Base URL of the CFDocs JSON files (data/en/). Only https is supported."
+        },
+        "cfscriptDocblockHover.cfdocs.engines": {
+          "type": "array",
+          "items": {
+            "type": "string",
+            "enum": ["coldfusion", "lucee", "boxlang"]
+          },
+          "uniqueItems": true,
+          "default": ["coldfusion", "lucee", "boxlang"],
+          "description": "Engines whose minimum versions are shown in the CFDocs hover."
         }
       }
     }
