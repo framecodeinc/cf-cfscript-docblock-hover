@@ -41,8 +41,8 @@ public struct function getUser(required numeric id) { ... }
 
 Both `@param name description` and the ColdFusion style `@name description` are supported.
 
-<img src="images/readme0.png" width="200px" />
-<img src="images/readme1.png" width="90%" />
+<img src="images/readme0.png" width="320px" />
+<img src="images/readme1.png" width="400px" />
 
 ```cfml
 // Timeout in seconds
@@ -50,13 +50,13 @@ this.timeout = 30;
 
 variables.cache = {}; // internal cache
 ```
-<img src="images/readme2.png" width="80%" />
+<img src="images/readme2.png" width="400px" />
 
-<img src="images/readme3.png" width="40%" />
+<img src="images/readme3.png" width="160px" />
 
-<img src="images/readme4.png" width="75%" />
+<img src="images/readme4.png" width="300px" />
 
-<img src="images/readme5.png" width="55%" />
+<img src="images/readme5.png" width="220px" />
 
 ```cfml
 <!--- Requested page --->
@@ -64,9 +64,9 @@ variables.cache = {}; // internal cache
 
 <cfproperty name="dsn" type="string" default="main" hint="Datasource">
 ```
-<img src="images/readme6.png" width="55%" />
+<img src="images/readme6.png" width="250px" />
 
-<img src="images/readme7.png" width="80%" />
+<img src="images/readme7.png" width="400px" />
 
 ## What is covered by CFDocs and what is not
 
