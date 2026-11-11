@@ -41,8 +41,8 @@ public struct function getUser(required numeric id) { ... }
 
 Both `@param name description` and the ColdFusion style `@name description` are supported.
 
-<img src="images/readme0.png" width="100%" />
-<img src="images/readme1.png" width="100%" />
+<img src="images/readme0.png" width="80%" />
+<img src="images/readme1.png" width="90%" />
 
 ```cfml
 // Timeout in seconds
@@ -50,7 +50,7 @@ this.timeout = 30;
 
 variables.cache = {}; // internal cache
 ```
-<img src="images/readme2.png" width="100%" />
+<img src="images/readme2.png" width="80%" />
 
 <img src="images/readme3.png" width="40%" />
 
