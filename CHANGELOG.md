@@ -1,6 +1,6 @@
 # Change Log
 
-All notable changes to the "ColdFusion Browser Launcher" extension will be documented in this file.
+All notable changes to the "ColdFusion CFScript DocBlock Hover" extension will be documented in this file.
 
 ---
 

@@ -1,16 +1,18 @@
 import * as vscode from 'vscode';
 import * as https from 'https';
 
-// ---------------------------------------------------------------------------
-// Tipos
-// ---------------------------------------------------------------------------
+/**
+ * Represents documentation parsed from a function DocBlock.
+ */
 interface DocInfo {
   description: string;
   params: Record<string, string>;
   returns: string;
   extra: Record<string, string>;
 }
-
+/**
+ * Describes a parsed function argument and its declaration metadata.
+ */
 interface ArgInfo {
   text: string;
   name: string;
@@ -18,7 +20,9 @@ interface ArgInfo {
   required: boolean;
   defaultValue?: string;
 }
-
+/**
+ * Stores a parsed function signature, documentation, and source-code range.
+ */
 interface FuncInfo {
   name: string;
   modifiers: string;
@@ -26,10 +30,12 @@ interface FuncInfo {
   args: ArgInfo[];
   doc: DocInfo;
   hasDoc: boolean;
-  start: number; // offset de la palabra "function"
-  end: number;   // offset del "}" de cierre (o del ")" si no hay cuerpo)
+  start: number; // Offset of the "function" keyword
+  end: number;   // Offset of the closing "}" (or ")" if there is no body)
 }
-
+/**
+ * Stores a parsed variable or property declaration and its documentation.
+ */
 interface VarInfo {
   scope: string; // variables | this | application | session | request | server | local
   name: string;
@@ -37,16 +43,21 @@ interface VarInfo {
   value?: string;
   type?: string;
   doc: string;
-  offset: number; // offset del inicio de la línea
-  bare?: boolean; // asignación sin ámbito: <cfset page = ...> / page = ...;
-}
+  offset: number; // Offset of the beginning of the line
+  bare?: boolean; // Unscoped assignment: <cfset page = ...> / page = ...;
 
+}
+/**
+ * Contains component-level metadata such as inheritance and implemented interfaces.
+ */
 interface ComponentInfo {
   extends?: string;
   implements?: string;
   description: string;
 }
-
+/**
+ * Represents the parsed metadata indexed for a single CFC document.
+ */
 interface IndexEntry {
   uri: vscode.Uri;
   funcs: FuncInfo[];
@@ -54,24 +65,33 @@ interface IndexEntry {
   component?: ComponentInfo;
 }
 
-// Ámbitos que pueden compartirse entre archivos / estar fuera de funciones
+/**
+ * Scopes that can be shared across files or exist outside functions
+ */
 const SHARED_SCOPES = ['variables', 'this', 'application', 'session', 'request', 'server'];
-// Ámbitos en los que se detectan asignaciones: x.nombre = valor
+/**
+ * Scopes in which assignments are detected: x.name = value
+ */
 const ASSIGN_SCOPES = [...SHARED_SCOPES, 'local', 'url', 'form', 'cookie', 'client'];
-// Ámbitos sobre los que se muestra hover: x.nombre
+/**
+ * Scopes for which hover documentation is displayed: x.name
+ */
 const HOVER_SCOPES = [...ASSIGN_SCOPES, 'arguments', 'cgi'];
 
 // ---------------------------------------------------------------------------
-// Funciones: docblock + firma
-// ---------------------------------------------------------------------------
+/**
+ * Functions: docblocks and signatures
+ */
 const FUNC_RE = new RegExp(
-  '^[ \\t]*(?:(\\/\\*\\*(?:(?!\\*\\/)[\\s\\S])*\\*\\/)\\s*)?' + // /** ... */ (sin cruzar otros comentarios)
+  '^[ \\t]*(?:(\\/\\*\\*(?:(?!\\*\\/)[\\s\\S])*\\*\\/)\\s*)?' + // /** ... */ (The optional preceding documentation comment must not cross another comment.)
   '((?:(?:public|private|package|remote|static|final|abstract)\\s+)*)' +
-  '(?:([\\w.]+)\\s+)?' + // tipo de retorno
+  '(?:([\\w.]+)\\s+)?' + // Return type
   'function\\s+(\\w+)\\s*\\(([^)]*)\\)',
   'gim'
 );
-
+/**
+ * Splits a function argument list while preserving commas inside nested expressions and quoted strings.
+ */
 function splitArgs(str: string): string[] {
   const out: string[] = [];
   let depth = 0;
@@ -92,7 +112,9 @@ function splitArgs(str: string): string[] {
   if (cur.trim()) { out.push(cur.trim()); }
   return out;
 }
-
+/**
+ * Parses a CFML function argument declaration into its name, type, required flag, and default value.
+ */
 function parseArg(text: string): ArgInfo {
   const eq = text.indexOf('=');
   const left = (eq >= 0 ? text.slice(0, eq) : text).trim();
@@ -104,7 +126,9 @@ function parseArg(text: string): ArgInfo {
   const type = rest.find(w => w.toLowerCase() !== 'required') || 'any';
   return { text, name, type, required, defaultValue };
 }
-
+/**
+ * Parses a JSDoc-style comment and extracts its description, parameter documentation, return description, and additional tags.
+ */
 function parseDoc(raw: string | undefined): DocInfo {
   const result: DocInfo = { description: '', params: {}, returns: '', extra: {} };
   if (!raw) { return result; }
@@ -139,7 +163,7 @@ function parseDoc(raw: string | undefined): DocInfo {
       desc.push(rest);
       append = t => { desc.push(t); };
     } else {
-      // Estilo ColdFusion: "@nombreParametro descripción"
+      // ColdFusion style: "@parameterName description"
       result.extra[tag] = rest;
       append = t => { result.extra[tag] += ' ' + t; };
     }
@@ -153,7 +177,9 @@ function parseDoc(raw: string | undefined): DocInfo {
   return result;
 }
 
-/** Devuelve el offset del "}" que cierra la "{" de `open`, ignorando strings y comentarios. */
+/**
+ * Returns the offset of the "}" that closes the "{" at `open`, ignoring strings and comments.
+ */
 function findBodyEnd(text: string, open: number): number {
   let depth = 0;
   for (let i = open; i < text.length; i++) {
@@ -185,7 +211,9 @@ function findBodyEnd(text: string, open: number): number {
   }
   return -1;
 }
-
+/**
+ * Parses CFScript function declarations and their preceding DocBlocks.
+ */
 export function parseFunctions(text: string): FuncInfo[] {
   const funcs: FuncInfo[] = [];
   FUNC_RE.lastIndex = 0;
@@ -195,13 +223,13 @@ export function parseFunctions(text: string): FuncInfo[] {
     const args = splitArgs(rawArgs).map(parseArg);
     const doc = parseDoc(rawDoc);
 
-    // Parámetros documentados al estilo "@nombre descripción"
+    // Parameters documented in the "@name description" style
     for (const a of args) {
       const k = a.name.toLowerCase();
       if (!doc.params[k] && doc.extra[k]) { doc.params[k] = doc.extra[k].trim(); }
     }
 
-    // Rango de la función (para resolver arguments., local. y var)
+    // Function range (used to resolve arguments., local., and var)
     const afterDoc = rawDoc ? full.indexOf(rawDoc) + rawDoc.length : 0;
     const kw = full.slice(afterDoc).search(/\bfunction\s/i);
     const start = m.index + afterDoc + Math.max(kw, 0);
@@ -224,20 +252,31 @@ export function parseFunctions(text: string): FuncInfo[] {
   return [...funcs, ...parseTagFunctions(text)];
 }
 
-// --- Funciones definidas con tags: <cffunction> + <cfargument> ---
+/**
+ * Functions defined with tags: <cffunction> ---
+ */
 const TAG_FUNC_RE = /(?:<!---((?:(?!--->)[\s\S])*)--->\s*)?<cffunction\b((?:"[^"]*"|'[^']*'|[^>"'])*)>/gi;
+/**
+ * Functions defined with tags: <cfargument> ---
+ */
 const TAG_ARG_RE = /<cfargument\b((?:"[^"]*"|'[^']*'|[^>"'])*)>/gi;
 
-/** Limpia el texto de un comentario CFML <!--- ... ---> */
+/**
+ * Removes the delimiters and whitespace from a CFML comment (<!--- ... --->).
+ */
 function cleanCfComment(s: string | undefined): string {
   return (s || '').split(/\r?\n/).map(l => l.trim()).filter(Boolean).join('\n').trim();
 }
 
-/** Valor de atributo como literal: números y booleanos tal cual, el resto entre comillas. */
+/**
+ * Formats an attribute value as a literal: numbers and booleans remain unquoted; all other values are quoted.
+ */
 function quoteAttr(v: string): string {
   return /^-?[\d.]+$|^(true|false|yes|no)$/i.test(v) ? v : `"${v}"`;
 }
-
+/**
+ * Extracts function signatures and documentation from <cffunction> and <cfargument> tags.
+ */
 function parseTagFunctions(text: string): FuncInfo[] {
   const funcs: FuncInfo[] = [];
   const lower = text.toLowerCase();
@@ -286,7 +325,9 @@ function parseTagFunctions(text: string): FuncInfo[] {
   return funcs;
 }
 
-/** Función más interna que contiene el offset. */
+/**
+ * Returns the innermost function containing the specified offset.
+ */
 function enclosingFunction(funcs: FuncInfo[], offset: number): FuncInfo | undefined {
   let best: FuncInfo | undefined;
   for (const f of funcs) {
@@ -294,27 +335,41 @@ function enclosingFunction(funcs: FuncInfo[], offset: number): FuncInfo | undefi
   }
   return best;
 }
-
+/**
+ * Formats a parsed argument as a readable type-annotated parameter declaration.
+ */
 function formatArg(a: ArgInfo): string {
   const optional = !a.required && a.defaultValue === undefined;
   const def = a.defaultValue !== undefined ? ` = ${a.defaultValue}` : '';
   return `${a.name}${optional ? '?' : ''}: ${a.type}${def}`;
 }
-
-/** Firma al estilo TypeScript: function getUser(id: numeric, opts?: struct): struct */
+/**
+ * Formats a TypeScript-style signature, for example: function getUser(id: numeric, opts?: struct): struct.
+ */
 export function formatSignature(fn: FuncInfo): string {
   return `function ${fn.name}(${fn.args.map(formatArg).join(', ')}): ${fn.returnType}`;
 }
 
-// ---------------------------------------------------------------------------
-// Variables: variables.x / this.x / application.x / local.x / var x / property
-// ---------------------------------------------------------------------------
+/**
+ * Variables: variables.x / this.x / application.x / local.x / var x / property
+ */
 const ASSIGN_RE = new RegExp(`^\\s*(${ASSIGN_SCOPES.join('|')})\\.(\\w+)\\s*=(?!=)\\s*(.*)$`, 'i');
+/**
+ * Variables: var x
+ */
 const VAR_RE = /^\s*var\s+(?:([\w.]+)\s+)?(\w+)\s*(?=[=;]|\/\/|$)(.*)$/i;
+/**
+ * Variables: var in for
+ */
 const FOR_VAR_RE = /^\s*for\s*\(\s*var\s+(?:([\w.]+)\s+)?(\w+)\s*(?=[=;]|\bin\b)/i;
+/**
+ * Variables: property
+ */
 const PROPERTY_RE = /^\s*property\s+([^;]*);?/i;
 
-/** Separa un comentario // final que no esté dentro de comillas. */
+/**
+ * Separates a trailing slash-slash comment that is not inside a quoted string.
+ */
 function splitTrailingComment(s: string): { code: string; comment: string } {
   let quote: string | null = null;
   for (let i = 0; i < s.length; i++) {
@@ -330,7 +385,9 @@ function splitTrailingComment(s: string): { code: string; comment: string } {
   }
   return { code: s, comment: '' };
 }
-
+/**
+ * Parses a CFML property declaration and returns its name, type, default value, and hint.
+ */
 function parseProperty(body: string): { name: string; type?: string; value?: string; hint?: string } | undefined {
   const attrs: Record<string, string> = {};
   const rest = body.replace(
@@ -346,7 +403,9 @@ function parseProperty(body: string): { name: string; type?: string; value?: str
   const type = attrs['type'] || (!attrs['name'] && tokens.length > 1 ? tokens[tokens.length - 2] : undefined);
   return { name, type, value: attrs['default'] !== undefined ? quoteAttr(attrs['default']) : undefined, hint: attrs['hint'] };
 }
-
+/**
+ * Extracts documented variables and properties from CFScript and tag-based CFML declarations.
+ */
 export function parseVariables(text: string): VarInfo[] {
   const vars: VarInfo[] = [];
   const rawLines = text.split('\n');
@@ -362,7 +421,7 @@ export function parseVariables(text: string): VarInfo[] {
 
     if (!t) { buffer = []; continue; }
 
-    // Comentario de bloque (/** ... */ o /* ... */), posiblemente de varias líneas
+    // Block comments, including documentation comments (/** ... */ o /* ... */), may span multiple lines.
     if (t.startsWith('/*')) {
       let chunk = t;
       let j = i;
@@ -376,13 +435,13 @@ export function parseVariables(text: string): VarInfo[] {
       continue;
     }
 
-    // Comentarios de línea consecutivos
+    // Consecutive line comments
     if (t.startsWith('//')) {
       buffer.push(t.replace(/^\/\/+\s?/, ''));
       continue;
     }
 
-    // Comentario CFML: <!--- ... --->
+    // CFML comment: <!--- ... --->
     if (t.startsWith('<!---')) {
       let chunk = t;
       let j = i;
@@ -507,7 +566,7 @@ export function parseVariables(text: string): VarInfo[] {
       continue;
     }
 
-    // page = valor;  (sin ámbito; debe terminar en ; para no confundirlo con structs de varias líneas)
+    // page = value; (unscoped; must end with ; to avoid confusing it with multiline structs)
     const bm = line.match(/^\s*(\w+)\s*=(?!=)\s*(.*?)\s*;\s*(?:\/\/\s*(.*))?$/);
     if (bm) {
       vars.push({
@@ -543,7 +602,9 @@ export function parseVariables(text: string): VarInfo[] {
   }
   return vars;
 }
-
+/**
+ * Determines whether a parsed variable matches the requested scope and identifier.
+ */
 function varMatches(v: VarInfo, scope: string, name: string): boolean {
   if (v.name.toLowerCase() !== name) { return false; }
   if (scope === 'local') { return v.kind === 'var' || v.scope === 'local'; }
@@ -551,7 +612,9 @@ function varMatches(v: VarInfo, scope: string, name: string): boolean {
   if (v.kind === 'property') { return scope === 'variables' || scope === 'this'; }
   return v.scope === scope;
 }
-
+/**
+ * Returns local variables declared within the specified function body.
+ */
 function localVarsOf(vars: VarInfo[], fn: FuncInfo | undefined): VarInfo[] {
   if (!fn) { return []; }
   return vars.filter(v =>
@@ -559,15 +622,17 @@ function localVarsOf(vars: VarInfo[], fn: FuncInfo | undefined): VarInfo[] {
   );
 }
 
-// ---------------------------------------------------------------------------
-// Markdown del hover
-// ---------------------------------------------------------------------------
+/**
+ * Hover Markdown
+ */
 function codeLanguage(): string {
   return vscode.workspace
     .getConfiguration('cfscriptDocblockHover')
     .get<string>('codeLanguage', 'cfscript-hover');
 }
-
+/**
+ * Builds hover Markdown for a user-defined function, including its signature and DocBlock details.
+ */
 function toMarkdown(fn: FuncInfo, fileLabel?: string): vscode.MarkdownString {
   const md = new vscode.MarkdownString();
   md.appendCodeblock(formatSignature(fn), codeLanguage());
@@ -581,7 +646,9 @@ function toMarkdown(fn: FuncInfo, fileLabel?: string): vscode.MarkdownString {
   if (fileLabel) { md.appendMarkdown(`\n---\n*${fileLabel}*`); }
   return md;
 }
-
+/**
+ * Builds hover Markdown for a function parameter and its documentation.
+ */
 function toMarkdownParam(fn: FuncInfo, a: ArgInfo): vscode.MarkdownString {
   const md = new vscode.MarkdownString();
   md.appendCodeblock(`(parameter) ${formatArg(a)}`, codeLanguage());
@@ -590,7 +657,9 @@ function toMarkdownParam(fn: FuncInfo, a: ArgInfo): vscode.MarkdownString {
   md.appendMarkdown(`\n*parameter of* \`${fn.name}\``);
   return md;
 }
-
+/**
+ * Builds hover Markdown for a variable or property, including its declaration and description.
+ */
 function toMarkdownVar(v: VarInfo, scope: string, fileLabel?: string): vscode.MarkdownString {
   const md = new vscode.MarkdownString();
   const val = v.value && v.value.length > 120 ? v.value.slice(0, 117) + '...' : v.value;
@@ -611,16 +680,21 @@ function toMarkdownVar(v: VarInfo, scope: string, fileLabel?: string): vscode.Ma
   return md;
 }
 
-// ---------------------------------------------------------------------------
-// Componentes: docblock, extends, resolución y herencia
-// ---------------------------------------------------------------------------
+/**
+ * Components: docblocks, extends, resolution, and inheritance
+ */
 const COMPONENT_RE = new RegExp(
   '^[ \\t]*(?:(\\/\\*\\*(?:(?!\\*\\/)[\\s\\S])*\\*\\/)\\s*)?' + // /** ... */
   '(?:(?:abstract|final)\\s+)*component\\b([^{;]*)\\{',
   'im'
 );
+/**
+ * <cfcomponent>
+ */
 const CFCOMPONENT_RE = /(?:<!---((?:(?!--->)[\s\S])*)--->\s*)?<cfcomponent\b((?:"[^"]*"|'[^']*'|[^>"'])*)>/i;
-
+/**
+ * Parses quoted and unquoted attributes from a CFML tag or component declaration.
+ */
 function parseAttrs(s: string): Record<string, string> {
   const attrs: Record<string, string> = {};
   s.replace(
@@ -632,7 +706,9 @@ function parseAttrs(s: string): Record<string, string> {
   );
   return attrs;
 }
-
+/**
+ * Parses component-level documentation and inheritance metadata from a CFC source file.
+ */
 export function parseComponent(text: string): ComponentInfo | undefined {
   const m = COMPONENT_RE.exec(text);
   if (m) {
@@ -655,18 +731,24 @@ export function parseComponent(text: string): ComponentInfo | undefined {
   }
   return undefined;
 }
-
+/**
+ * Returns a component file name without its directory or CFML extension.
+ */
 function uriBase(u: vscode.Uri): string {
   const p = u.path;
   return p.slice(p.lastIndexOf('/') + 1).replace(/\.(cfc|cfm|cfml)$/i, '');
 }
-
+/**
+ * Returns the normalized directory path containing the specified document.
+ */
 function uriDir(u: vscode.Uri): string {
   const p = u.path;
   return p.slice(0, p.lastIndexOf('/')).toLowerCase();
 }
 
-/** Busca componentes por nombre o ruta con puntos (app.models.Logger). Los mejores primero. */
+/**
+ * Finds components by name or dotted path (app.models.Logger), with the best matches first.
+ */
 function resolveComponents(ref: string, fromUri?: vscode.Uri, extra: IndexEntry[] = []): IndexEntry[] {
   const parts = ref.split('.').filter(Boolean);
   if (!parts.length) { return []; }
@@ -687,14 +769,16 @@ function resolveComponents(ref: string, fromUri?: vscode.Uri, extra: IndexEntry[
     (fromUri && uriDir(e.uri) === uriDir(fromUri) ? 1 : 0);
 
   matches.sort((a, b) => score(b) - score(a));
-  // Si la ruta con puntos coincide exactamente, descarta el resto
+  // If the dotted path matches exactly, discard the remaining matches
   if (parts.length > 1 && matches.length && score(matches[0]) >= 2) {
     return matches.filter(e => score(e) >= 2);
   }
   return matches;
 }
 
-/** Componentes base (extends) del indicado, del más cercano al más lejano. */
+/**
+ * Returns the base components (extends) of the specified component, from nearest to farthest.
+ */
 export function inheritanceChain(entry: IndexEntry): IndexEntry[] {
   const chain: IndexEntry[] = [];
   const seen = new Set<string>([entry.uri.toString()]);
@@ -710,7 +794,9 @@ export function inheritanceChain(entry: IndexEntry): IndexEntry[] {
   }
   return chain;
 }
-
+/**
+ * Builds hover Markdown for a component and its constructor, including inherited initialization details.
+ */
 function toMarkdownComponent(e: IndexEntry, fileLabel?: string): vscode.MarkdownString {
   const name = uriBase(e.uri);
   const c = e.component;
@@ -732,9 +818,9 @@ function toMarkdownComponent(e: IndexEntry, fileLabel?: string): vscode.Markdown
   return md;
 }
 
-// ---------------------------------------------------------------------------
-// Ámbitos nativos (url, form, cgi...): descripciones breves propias de la extensión
-// ---------------------------------------------------------------------------
+/**
+ * Native scopes (url, form, cgi, etc.): brief descriptions provided by the extension
+ */
 const SCOPE_INFO = new Map<string, string>([
   ['url', 'Parameters passed in the URL query string of the current request.'],
   ['form', 'Fields submitted by an HTML form using the POST method.'],
@@ -750,7 +836,9 @@ const SCOPE_INFO = new Map<string, string>([
   ['local', 'Variables local to the current function.'],
   ['arguments', 'Arguments passed to the current function.']
 ]);
-
+/**
+ * CGI vars.
+ */
 const CGI_VARS = new Map<string, string>([
   ['http_host', 'Host name (and port) requested by the client.'],
   ['server_name', 'Host name of the server.'],
@@ -777,7 +865,9 @@ const CGI_VARS = new Map<string, string>([
   ['http_x_forwarded_for', 'Client IP behind proxies or load balancers. Can be spoofed by the client.']
 ]);
 
-// Sentencias de cfscript que equivalen a un tag (include "x.cfm"; location(url="x"); param name="x"; ...)
+/**
+ * cfscript statements equivalent to tags (include "x.cfm"; location(url="x"); param name="x"; ...)
+ */
 const SCRIPT_STATEMENTS = new Map<string, string>([
   ['include', 'cfinclude'],
   ['abort', 'cfabort'],
@@ -792,9 +882,14 @@ const SCRIPT_STATEMENTS = new Map<string, string>([
   ['transaction', 'cftransaction'],
   ['import', 'cfimport']
 ]);
+/**
+ * Const with cfscript statements separates with |
+ */
 const SCRIPT_ALT = [...SCRIPT_STATEMENTS.keys()].join('|');
 
-// Ajustes de Application.cfc que pueden no figurar como atributos de cfapplication en CFDocs
+/**
+ * Application.cfc settings that may not be listed as cfapplication attributes in CFDocs
+ */
 const APP_SETTINGS = new Map<string, string>([
   ['mappings', 'Struct that maps logical paths to directories (e.g. { "/lib": expandPath("./lib") }), used to resolve include, createObject, new and extends.'],
   ['customtagpaths', 'Directories (list or array) searched for custom tags.'],
@@ -808,9 +903,13 @@ const APP_SETTINGS = new Map<string, string>([
   ['enablenullsupport', 'Enables null support, so null values are kept instead of being converted to empty strings.'],
   ['sameformfieldsasarray', 'Returns form fields that share a name as an array instead of a comma-delimited list.']
 ]);
-
+/**
+ * Const with URL scopes.
+ */
 const SCOPES_URL = 'https://cfdocs.org/scopes';
-
+/**
+ * Builds hover Markdown describing a native CFML scope.
+ */
 function toMarkdownScope(scope: string): vscode.MarkdownString {
   const md = new vscode.MarkdownString();
   md.appendCodeblock(`(scope) ${scope}`, codeLanguage());
@@ -819,7 +918,9 @@ function toMarkdownScope(scope: string): vscode.MarkdownString {
   return md;
 }
 
-/** Hover de un miembro de un ámbito de petición: url.page, form.nombre, cgi.http_host ... */
+/**
+ * Provides hover documentation for a request-scope member: url.page, form.name, cgi.http_host, etc.
+ */
 export function nativeScopeMember(scope: string, name: string): vscode.MarkdownString | undefined {
   let desc: string | undefined;
   switch (scope) {
@@ -837,9 +938,9 @@ export function nativeScopeMember(scope: string, name: string): vscode.MarkdownS
   return md;
 }
 
-// ---------------------------------------------------------------------------
-// Funciones y tags nativos de CFML: consulta en línea a CFDocs (sin empaquetar los datos)
-// ---------------------------------------------------------------------------
+/**
+ * Represents a parameter or tag attribute from a CFDocs entry.
+ */
 interface CfDocsParam {
   name: string;
   description?: string;
@@ -848,7 +949,9 @@ interface CfDocsParam {
   type?: string;
   values?: unknown[];
 }
-
+/**
+ * Represents the documentation metadata for a native CFML function or tag retrieved from CFDocs.
+ */
 interface CfDocsEntry {
   name: string;
   type?: string; // function | tag
@@ -861,18 +964,36 @@ interface CfDocsEntry {
   params?: CfDocsParam[];
   engines?: Record<string, { minimum_version?: string; notes?: string; docs?: string }>;
 }
-
+/**
+ * CFDocs default base URL.
+ */
 const CFDOCS_DEFAULT_BASE = 'https://raw.githubusercontent.com/foundeo/cfdocs/master/data/en/';
+/**
+ * Days to reload CFDocs cache.
+ */
 const DAY_MS = 86400000;
+/**
+ * Const with Keywords.
+ */
 const NOT_FUNCTIONS = new Set([
   'if', 'else', 'elseif', 'for', 'while', 'do', 'switch', 'case', 'catch', 'try', 'finally',
   'function', 'return', 'new', 'throw', 'and', 'or', 'not', 'in', 'is', 'eq', 'neq', 'lt', 'gt', 'lte', 'gte'
 ]);
-
+/**
+ * VSCode storage utility.
+ */
 let storage: vscode.Memento | undefined;
+/**
+ * Time to wait reload CFDocs cache.
+ */
 let offlineUntil = 0;
+/**
+ * Map CfDocsEntry information.
+ */
 const cfdocsMemory = new Map<string, Promise<CfDocsEntry | null>>();
-
+/**
+ * Reads the CFDocs enablement setting and the configured documentation data URL.
+ */
 function cfdocsSettings(): { enabled: boolean; base: string } {
   const cfg = vscode.workspace.getConfiguration('cfscriptDocblockHover');
   const base = cfg.get<string>('cfdocs.baseUrl', CFDOCS_DEFAULT_BASE);
@@ -881,7 +1002,9 @@ function cfdocsSettings(): { enabled: boolean; base: string } {
     base: base.endsWith('/') ? base : base + '/'
   };
 }
-
+/**
+ * Retrieves a URL over HTTPS and returns the HTTP status code and response body.
+ */
 function httpGet(url: string, timeoutMs = 4000): Promise<{ status: number; body: string }> {
   return new Promise((resolve, reject) => {
     const req = https.get(url, { headers: { 'User-Agent': 'cf-cfscript-docblock-hover' } }, res => {
@@ -895,7 +1018,9 @@ function httpGet(url: string, timeoutMs = 4000): Promise<{ status: number; body:
   });
 }
 
-/** JSON.parse tolerante a comas finales (algunos archivos de CFDocs las tienen). */
+/**
+ * Parses JSON while tolerating trailing commas, which appear in some CFDocs files.
+ */
 export function parseJsonLoose(text: string): unknown {
   try {
     return JSON.parse(text);
@@ -903,7 +1028,9 @@ export function parseJsonLoose(text: string): unknown {
     return JSON.parse(text.replace(/,(\s*[}\]])/g, '$1'));
   }
 }
-
+/**
+ * Loads a CFDocs entry from the configured data source, using persistent caching and temporary offline backoff.
+ */
 async function loadCfDocs(key: string): Promise<CfDocsEntry | null> {
   const storeKey = `cfdocs.v1.${key}`;
   const cached = storage?.get<{ t: number; d: CfDocsEntry | null }>(storeKey);
@@ -923,12 +1050,14 @@ async function loadCfDocs(key: string): Promise<CfDocsEntry | null> {
       return null;
     }
   } catch {
-    offlineUntil = Date.now() + 60000; // sin red o respuesta inválida: no insistir durante 1 minuto
+    offlineUntil = Date.now() + 60000; // No network connection or invalid response: do not retry for one minute
   }
-  cfdocsMemory.delete(key); // no se guarda: se reintentará más tarde
+  cfdocsMemory.delete(key); // Do not cache this result; retry later
   return null;
 }
-
+/**
+ * Retrieves a CFDocs entry by name, reusing an in-flight or cached lookup where possible.
+ */
 async function getCfDocs(name: string): Promise<CfDocsEntry | null> {
   const key = name.toLowerCase();
   if (!/^[a-z0-9_]+$/.test(key)) { return null; }
@@ -939,28 +1068,38 @@ async function getCfDocs(name: string): Promise<CfDocsEntry | null> {
   }
   return p;
 }
-
+/**
+ * Normalizes whitespace and truncates a documentation string to a single line.
+ */
 function oneLine(s: string | undefined, max = 240): string {
   const t = (s || '').replace(/\s+/g, ' ').trim();
   return t.length > max ? t.slice(0, max - 1) + '…' : t;
 }
-
+/**
+ * Converts a CFDocs default value into a displayable CFML literal.
+ */
 function cfdocsDefault(d: unknown): string | undefined {
   if (d === undefined || d === null || d === '') { return undefined; }
   return typeof d === 'string' ? quoteAttr(d) : String(d);
 }
-
+/**
+ * Formats a CFDocs parameter as a readable type-annotated signature fragment.
+ */
 function cfdocsParamLine(p: CfDocsParam): string {
   const def = cfdocsDefault(p.default);
   const optional = !p.required && def === undefined;
   return `${p.name}${optional ? '?' : ''}: ${p.type || 'any'}${def !== undefined ? ` = ${def}` : ''}`;
 }
 
-/** Firma al estilo TypeScript: function arrayAppend(array: array, value: any, merge?: boolean): boolean */
+/**
+ * Formats a TypeScript-style signature, for example: function arrayAppend(array: array, value: any, merge?: boolean): boolean.
+ */
 export function cfdocsSignature(e: CfDocsEntry): string {
   return `function ${e.name}(${(e.params ?? []).map(cfdocsParamLine).join(', ')}): ${e.returns || 'void'}`;
 }
-
+/**
+ * Returns the configured CFML engine names and their minimum supported versions for a CFDocs entry.
+ */
 function cfdocsEngines(e: CfDocsEntry): string {
   const engines = (e.engines ?? {}) as Record<string, { minimum_version?: string } | undefined>;
   const labels: Record<string, string> = { coldfusion: 'ColdFusion', lucee: 'Lucee', boxlang: 'BoxLang' };
@@ -973,13 +1112,17 @@ function cfdocsEngines(e: CfDocsEntry): string {
     .map(k => `${labels[k]}${engines[k]?.minimum_version ? ` ${engines[k]?.minimum_version}+` : ''}`)
     .join(' · ');
 }
-
+/**
+ * Appends engine compatibility information and the source link to a CFDocs hover.
+ */
 function cfdocsFooter(md: vscode.MarkdownString, e: CfDocsEntry): void {
   const engines = cfdocsEngines(e);
   const url = `https://cfdocs.org/${e.name.toLowerCase()}`;
   md.appendMarkdown(`\n---\n${engines ? `*${engines}* · ` : ''}*CFDocs:* [${url.replace('https://', '')}](${url})`);
 }
-
+/**
+ * Builds hover Markdown for a native CFML function or tag documented by CFDocs.
+ */
 function toMarkdownCfDocs(e: CfDocsEntry, scriptForm = false): vscode.MarkdownString {
   const md = new vscode.MarkdownString();
   const isTag = e.type === 'tag';
@@ -1005,7 +1148,9 @@ function toMarkdownCfDocs(e: CfDocsEntry, scriptForm = false): vscode.MarkdownSt
   cfdocsFooter(md, e);
   return md;
 }
-
+/**
+ * Builds hover Markdown for an Application.cfc setting documented by CFDocs.
+ */
 function toMarkdownCfDocsSetting(e: CfDocsEntry, p: CfDocsParam): vscode.MarkdownString {
   const md = new vscode.MarkdownString();
   md.appendCodeblock(`(setting) this.${p.name}: ${p.type || 'any'}`, codeLanguage());
@@ -1017,7 +1162,9 @@ function toMarkdownCfDocsSetting(e: CfDocsEntry, p: CfDocsParam): vscode.Markdow
   return md;
 }
 
-/** Ajuste de aplicación (this.name, this.sessionTimeout ...) documentado como atributo de cfapplication. */
+/**
+ * Application setting (this.name, this.sessionTimeout, etc.) documented as a cfapplication attribute.
+ */
 async function getAppSetting(name: string, online: boolean): Promise<vscode.MarkdownString | undefined> {
   if (online) {
     const e = await getCfDocs('cfapplication');
@@ -1032,7 +1179,9 @@ async function getAppSetting(name: string, online: boolean): Promise<vscode.Mark
   md.appendMarkdown('\n---\n*Application.cfc setting* · *CFDocs:* [cfdocs.org/application](https://cfdocs.org/application)');
   return md;
 }
-
+/**
+ * Builds hover Markdown for a native function parameter or tag attribute documented by CFDocs.
+ */
 function toMarkdownCfDocsParam(e: CfDocsEntry, p: CfDocsParam): vscode.MarkdownString {
   const md = new vscode.MarkdownString();
   md.appendCodeblock(`(attribute) ${cfdocsParamLine(p)}`, codeLanguage());
@@ -1045,12 +1194,17 @@ function toMarkdownCfDocsParam(e: CfDocsEntry, p: CfDocsParam): vscode.MarkdownS
   return md;
 }
 
-// ---------------------------------------------------------------------------
-// Índice de CFCs del workspace
-// ---------------------------------------------------------------------------
+/**
+ * Workspace CFC index
+ */
 export const index = new Map<string, IndexEntry>();
+/**
+ * Promise to index
+ */
 let indexReady: Promise<unknown> | undefined;
-
+/**
+ * Reads a CFC file, parses its declarations, and adds the resulting metadata to the workspace index.
+ */
 async function indexFile(uri: vscode.Uri): Promise<void> {
   try {
     const bytes = await vscode.workspace.fs.readFile(uri);
@@ -1065,7 +1219,9 @@ async function indexFile(uri: vscode.Uri): Promise<void> {
     index.delete(uri.toString());
   }
 }
-
+/**
+ * Builds the workspace component index once and returns the shared indexing promise.
+ */
 function ensureIndex(): Promise<unknown> {
   indexReady ??= Promise.resolve(
     vscode.workspace.findFiles('**/*.cfc', '**/node_modules/**')
@@ -1073,9 +1229,9 @@ function ensureIndex(): Promise<unknown> {
   return indexReady;
 }
 
-// ---------------------------------------------------------------------------
-// Activación
-// ---------------------------------------------------------------------------
+/**
+ * Initializes the extension, watches CFC files, and registers the CFML hover provider.
+ */
 export function activate(context: vscode.ExtensionContext): void {
   storage = context.globalState;
   const watcher = vscode.workspace.createFileSystemWatcher('**/*.cfc');
@@ -1100,7 +1256,7 @@ export function activate(context: vscode.ExtensionContext): void {
         const vars = parseVariables(text);
         const current: IndexEntry = { uri: document.uri, funcs, vars, component: parseComponent(text) };
 
-        // N) new MiComponente() / extends="app.models.Base"
+        // N) new MyComponent() / extends="app.models.Base"
         const wide = document.getWordRangeAtPosition(position, /[A-Za-z_][\w.]*/);
         if (wide) {
           const wBefore = lineText.slice(0, wide.start.character);
@@ -1125,7 +1281,7 @@ export function activate(context: vscode.ExtensionContext): void {
 
         const cfdocs = cfdocsSettings();
 
-        // T) Tags nativos: <cfhttp ...> (nombre del tag) y sus atributos (method="get")
+        // T) Native tags: <cfhttp ...> (tag name) and its attributes (method="get")
         if (cfdocs.enabled) {
           const lt = before.lastIndexOf('<');
           const seg = lt >= 0 ? before.slice(lt) : '';
@@ -1144,7 +1300,7 @@ export function activate(context: vscode.ExtensionContext): void {
           }
         }
 
-        // T2) Atributos de tags en cfscript: cfcontent(type="...") / cfcontent type="...";
+        // T2) Tag attributes in cfscript: cfcontent(type="...") / cfcontent type="...";
         if (cfdocs.enabled && /^\s*=(?!=)/.test(lineText.slice(range.end.character))) {
           const pm = before.match(new RegExp(`(?<![.\\w])(cf[a-z0-9_]+|${SCRIPT_ALT})\\s*\\(([^()]*)$`, 'i'));
           const sm2 = before.match(new RegExp(`(?:^|[;{}])\\s*(cf[a-z0-9_]+|${SCRIPT_ALT})\\s+([^;{}()]*)$`, 'i'));
@@ -1157,7 +1313,7 @@ export function activate(context: vscode.ExtensionContext): void {
           }
         }
 
-        // A) Variable con ámbito: arguments.x, local.x, variables.x, this.x, application.x ...
+        // A) Scoped variable: arguments.x, local.x, variables.x, this.x, application.x, etc.
         const sm = before.match(new RegExp(`\\b(${HOVER_SCOPES.join('|')})\\.$`, 'i'));
         if (sm && !isCall) {
           const scope = sm[1].toLowerCase();
@@ -1179,7 +1335,7 @@ export function activate(context: vscode.ExtensionContext): void {
             );
           }
 
-          // Campos heredados de los componentes base (extends)
+          // Members inherited from base components (extends)
           if (scope === 'variables' || scope === 'this') {
             await ensureIndex();
             for (const e of inheritanceChain(current)) {
@@ -1191,7 +1347,7 @@ export function activate(context: vscode.ExtensionContext): void {
             return setting ? new vscode.Hover(setting, range) : undefined;
           }
 
-          // Ámbitos compartidos: se pueden definir en otro CFC (p. ej. Application.cfc)
+          // Shared scopes: these can be defined in another CFC (for example, Application.cfc)
           if (scope !== 'local') {
             await ensureIndex();
             const found: vscode.MarkdownString[] = [];
@@ -1206,7 +1362,7 @@ export function activate(context: vscode.ExtensionContext): void {
           return nat ? new vscode.Hover(nat, range) : undefined;
         }
 
-        // C) Identificador suelto dentro de una función: parámetro o variable local (var / local.x)
+        // C) Unqualified identifier inside a function: parameter or local variable (var / local.x)
         if (!isCall && fn && !before.endsWith('.')) {
           const p = fn.args.find(a => a.name.toLowerCase() === word);
           if (p) { return new vscode.Hover(toMarkdownParam(fn, p), range); }
@@ -1217,12 +1373,12 @@ export function activate(context: vscode.ExtensionContext): void {
           }
         }
 
-        // S) Nombre de ámbito seguido de "." o "[": url.x, form.x, cgi.x, session.x ...
+        // S) Scope name followed by "." or "[": url.x, form.x, cgi.x, session.x, etc
         if (!isCall && !before.endsWith('.') && SCOPE_INFO.has(word) && /^\s*[.\[]/.test(lineText.slice(range.end.character))) {
           return new vscode.Hover(toMarkdownScope(word), range);
         }
 
-        // D) Identificador suelto: variable del ámbito variables (<cfset page = ...>, page = ...;, property)
+        // D) Unqualified identifier: variables-scope variable (<cfset page = ...>, page = ...;, property)
         if (!isCall && !before.endsWith('.')) {
           const own = vars
             .filter(v => v.kind !== 'var' && v.scope === 'variables' && v.name.toLowerCase() === word)
@@ -1241,7 +1397,7 @@ export function activate(context: vscode.ExtensionContext): void {
           }
         }
 
-        // Tag en cfscript: cfcontent type="text/html";  /  include "x.cfm";  /  location(url="x")
+        // Tag in cfscript: cfcontent type="text/html";  /  include "x.cfm";  /  location(url="x")
         if (cfdocs.enabled && !before.endsWith('.')) {
           const atStatement = /(?:^|[;{}])\s*$/.test(before) && !/^\s*=(?!=)/.test(lineText.slice(range.end.character));
           const isUserFn = funcs.some(f => f.name.toLowerCase() === word);
@@ -1253,7 +1409,7 @@ export function activate(context: vscode.ExtensionContext): void {
           }
         }
 
-        // B) Función: nombre seguido de "(" (llamada o declaración)
+        // B) Function: name followed by "(" (call or declaration)
         if (!isCall) { return undefined; }
 
         const isSuper = /\bsuper\.$/i.test(before);
@@ -1268,7 +1424,7 @@ export function activate(context: vscode.ExtensionContext): void {
 
         await ensureIndex();
 
-        // Métodos heredados de los componentes base
+        // Methods inherited from base components
         if (own) {
           const inherited: vscode.MarkdownString[] = [];
           for (const e of inheritanceChain(current)) {
@@ -1280,7 +1436,7 @@ export function activate(context: vscode.ExtensionContext): void {
           if (inherited.length) { return new vscode.Hover(inherited.slice(0, 3), range); }
         }
 
-        // Cualquier otro CFC del workspace con ese método documentado
+        // Any other CFC in the workspace with that documented method
         const found: vscode.MarkdownString[] = [];
         for (const { uri, funcs: fs } of index.values()) {
           for (const f of fs) {
@@ -1291,7 +1447,7 @@ export function activate(context: vscode.ExtensionContext): void {
         }
         if (found.length) { return new vscode.Hover(found.slice(0, 5), range); }
 
-        // Función nativa de CFML (CFDocs): solo si no es método de otro objeto (obj.metodo())
+        // Native CFML function (CFDocs): only when it is not a method of another object (obj.method())
         if (cfdocs.enabled && !before.endsWith('.') && !NOT_FUNCTIONS.has(word) && /^[a-z_]\w*$/.test(word)) {
           const e = await getCfDocs(word);
           if (e) { return new vscode.Hover(toMarkdownCfDocs(e, e.type === 'tag'), range); }
@@ -1302,4 +1458,7 @@ export function activate(context: vscode.ExtensionContext): void {
   );
 }
 
+/**
+ * Releases extension resources when the extension is deactivated.
+ */
 export function deactivate(): void {}
