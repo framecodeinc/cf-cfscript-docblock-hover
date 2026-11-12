@@ -4,5 +4,5 @@ All notable changes to the "ColdFusion CFScript DocBlock Hover" extension will b
 
 ---
 
-## [1.0.0] - 2026-11-09
+## [1.0.0] - 2026-11-11
 - First version: hover with the docblock of CFScript functions (.cfc and <cfscript> in .cfm).

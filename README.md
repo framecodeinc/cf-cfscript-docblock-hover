@@ -28,6 +28,8 @@ It also shows the documentation of native ColdFusion functions, tags and stateme
 
 Base components (`extends`) are walked upwards: if a field or method is not in the current file, it is looked up in the parent, the grandparent, and so on.
 
+Included templates are followed too (`include "subpage.cfm";`, `include template="subpage.cfm";` and `<cfinclude template="subpage.cfm">`): if a variable or function is not in the current file, it is looked up in the files it includes, up to 5 levels deep. For example, if `subpage.cfm` defines `variables.name` with a comment and `page.cfm` includes `subpage.cfm`, hovering `variables.name` in `page.cfm` shows that comment.
+
 ### How to write the documentation
 
 ```cfml
@@ -106,7 +108,7 @@ You can configure the extension in two ways.
 **From the Settings UI**
 
 1. Open Settings (`Ctrl+,` on Windows/Linux, `Cmd+,` on macOS).
-2. Search for `CFScript DocBlock Hover` (or `cfscriptDocblockHover`).
+2. Search for `ColdFusion CFScript DocBlock Hover` (or `cfscriptDocblockHover`).
 3. Change the values. They are saved automatically.
 
 <img src="images/readme8.png" width="100%" />
@@ -152,6 +154,13 @@ The hover colors follow your current theme. If the code in the hover appears wit
 - Base components are searched only in the `.cfc` files of the open workspace, not in mappings that point to other folders.
 - `createObject("component", "path.Component")` is not resolved.
 - Functions defined with `<cffunction>` are recognized, but a `<cfcomponent>` only provides `extends` and the description.
+
+**Includes**
+- Only includes written as a string are followed. Paths with a dynamic part (`#path#`) are ignored.
+- A relative path is resolved from the folder of the including file, and a path that starts with `/` from each workspace folder. If neither exists (for example a mapping), the workspace is searched for that path, which can pick the wrong file if several files end with the same path.
+- Includes are followed up to 5 levels deep.
+- Only the files that the current file includes are searched, not the files that include it.
+- Changes that are not saved are taken into account only for files that are open in an editor; the other files are read from disk.
 
 **Tags**
 - `<cfset>`, `<cfparam>` and `<cfproperty>` are detected only if the tag starts at the beginning of the line and is complete on a single line.

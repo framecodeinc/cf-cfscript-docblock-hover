@@ -39,7 +39,7 @@
       }
     ],
     "configuration": {
-      "title": "CFScript DocBlock Hover",
+      "title": "ColdFusion CFScript DocBlock Hover",
       "properties": {
         "cfscriptDocblockHover.codeLanguage": {
           "type": "string",
