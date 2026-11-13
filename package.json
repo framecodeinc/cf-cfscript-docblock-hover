@@ -67,6 +67,11 @@
           "uniqueItems": true,
           "default": ["coldfusion", "lucee", "boxlang"],
           "description": "Engines whose minimum versions are shown in the CFDocs hover."
+        },
+        "cfscriptDocblockHover.includes.searchParents": {
+          "type": "boolean",
+          "default": true,
+          "description": "Also look for variables and functions in the files that include the current file. The workspace is scanned once to find them; turn it off in very large workspaces."
         }
       }
     }

@@ -25,10 +25,11 @@ It also shows the documentation of native ColdFusion functions, tags and stateme
 | Unscoped variables (`<cfset page = ...>`, `page = ...;`) | `page = value` | Comment above or at the end of the line |
 | `property`, `<cfproperty>`, `<cfparam>` | Type, default value and `hint` | Attributes and comment above |
 | Request scopes (`url.x`, `form.x`, `cookie.x`, `client.x`) | Type and value when declared with `cfparam` or assigned | Comment and attributes; otherwise generic text |
+| Struct members (`{ dsn: "main" }`, `config.dsn`) | `config.dsn = "main"` | Comment above the key or at the end of its line |
 
 Base components (`extends`) are walked upwards: if a field or method is not in the current file, it is looked up in the parent, the grandparent, and so on.
 
-Included templates are followed too (`include "subpage.cfm";`, `include template="subpage.cfm";` and `<cfinclude template="subpage.cfm">`): if a variable or function is not in the current file, it is looked up in the files it includes, up to 5 levels deep. For example, if `subpage.cfm` defines `variables.name` with a comment and `page.cfm` includes `subpage.cfm`, hovering `variables.name` in `page.cfm` shows that comment.
+Included templates are followed too (`include "subpage.cfm";`, `include template="subpage.cfm";` and `<cfinclude template="subpage.cfm">`): if a variable or function is not in the current file, it is looked up in the files it includes, up to 5 levels deep, and also in the files that include it. For example, if `page.cfm` includes `header.cfm`, which defines `variables.pageTitle` with a comment, and then includes `subpage.cfm`, hovering `variables.pageTitle` in `subpage.cfm` shows that comment, even though `subpage.cfm` does not include `header.cfm`.
 
 ### How to write the documentation
 
@@ -69,6 +70,26 @@ variables.cache = {}; // internal cache
 <img src="images/readme6.png" width="250px" />
 
 <img src="images/readme7.png" width="400px" />
+
+### Struct members
+
+The keys of a struct literal can be documented in the same way:
+
+```cfml
+variables.config = {
+  // Database name
+  dsn: "main",
+  timeout: 30 // Timeout in seconds
+};
+```
+
+Hovering `dsn` inside the literal, or `variables.config.dsn` / `config.dsn` anywhere else, shows the comment. Nested structs are supported.
+
+### Parameter hints while you type
+
+While you type a call, VS Code shows its signature and highlights the current parameter with its description. After writing the comma in `getUser(1, ` you see the description of the second parameter.
+
+It works for functions of the current file, of the included templates, of the base components and of other components, for the constructor in `new MyComponent(`, and for native functions from CFDocs. Named arguments (`id = 5`) are followed too.
 
 ## What is covered by CFDocs and what is not
 
@@ -133,6 +154,7 @@ User settings apply to every project. Workspace settings apply only to the open 
 | `cfscriptDocblockHover.cfdocs.enabled` | `true` | Shows native documentation by querying CFDocs. |
 | `cfscriptDocblockHover.cfdocs.baseUrl` | `https://raw.githubusercontent.com/foundeo/cfdocs/master/data/en/` | Base URL of the CFDocs JSON files. Only `https` is supported. |
 | `cfscriptDocblockHover.cfdocs.engines` | `["coldfusion", "lucee", "boxlang"]` | Engines whose minimum versions are shown. With `["coldfusion"]` you only see ColdFusion. |
+| `cfscriptDocblockHover.includes.searchParents` | `true` | Also looks for variables and functions in the files that include the current file. The workspace is scanned once to find them; turn it off in very large workspaces. |
 
 Changes apply immediately, without reloading the window. Responses already cached from CFDocs are kept for up to 7 days, even if you change `baseUrl`.
 
@@ -159,8 +181,19 @@ The hover colors follow your current theme. If the code in the hover appears wit
 - Only includes written as a string are followed. Paths with a dynamic part (`#path#`) are ignored.
 - A relative path is resolved from the folder of the including file, and a path that starts with `/` from each workspace folder. If neither exists (for example a mapping), the workspace is searched for that path, which can pick the wrong file if several files end with the same path.
 - Includes are followed up to 5 levels deep.
-- Only the files that the current file includes are searched, not the files that include it.
+- The files that include the current file are found by scanning the `.cfm`, `.cfc`, `.cfml`, `.cfinc` and `.inc` files of the workspace once, and by keeping that index up to date as files change. If several files include the current one, up to 5 are used.
+- The order of execution is not taken into account: every file in the chain is searched, even those that run after the current file.
 - Changes that are not saved are taken into account only for files that are open in an editor; the other files are read from disk.
+
+**Struct members**
+- Only struct literals written with `{ ... }` in cfscript are parsed (`variables.x = { ... }`, `var x = { ... }` and `x = { ... }`). Literals in `<cfset>` tags and ordered structs written with `[ ... ]` are not.
+- Members that are added later (`config.extra = 1;`) are not documented.
+- Access with brackets (`config["dsn"]`) is not resolved.
+
+**Parameter hints**
+- Calls to tags written in cfscript (`cfhttp(...)`) do not show parameter hints.
+- For a method of another object (`obj.method(`), a signature is shown only if a documented function with that name exists in the workspace.
+- At most 3 definitions are shown when several functions share a name.
 
 **Tags**
 - `<cfset>`, `<cfparam>` and `<cfproperty>` are detected only if the tag starts at the beginning of the line and is complete on a single line.

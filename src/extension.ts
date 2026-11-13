@@ -83,6 +83,22 @@ interface VarInfo {
   offset: number;
   /** True for an unscoped assignment: `<cfset page = ...>` or `page = ...;`. */
   bare?: boolean;
+  /** Members of the struct literal that is assigned to the variable, when there is one. */
+  members?: StructMember[];
+}
+
+/** A member (key) of a struct literal. */
+interface StructMember {
+  /** Name of the key. */
+  name: string;
+  /** Offset of the key in the file. */
+  offset: number;
+  /** Value of the key, as written on its first line. */
+  value?: string;
+  /** Documentation: the comments above the key and the comment at the end of its line. */
+  doc: string;
+  /** Members of a nested struct literal. */
+  members?: StructMember[];
 }
 
 /** Component level information: base component and description. */
@@ -489,6 +505,134 @@ function parseProperty(body: string): { name: string; type?: string; value?: str
 }
 
 /**
+ * Parses the members of a struct literal, with the comments that document each key.
+ * A comment above a key, or at the end of its line, documents that key.
+ * @param text - Source code of the file.
+ * @param open - Offset of the opening "{".
+ * @param close - Offset of the matching "}".
+ * @returns The members, in order. Nested struct literals are parsed recursively.
+ */
+function parseStructLiteral(text: string, open: number, close: number): StructMember[] {
+  // 1) Split the body into entries at the top-level commas
+  const segments: { start: number; end: number }[] = [];
+  let depth = 0;
+  let start = open + 1;
+  for (let i = open + 1; i < close; i++) {
+    const ch = text[i];
+    const next = text[i + 1];
+    if (ch === '/' && next === '/') {
+      const nl = text.indexOf('\n', i);
+      if (nl < 0 || nl >= close) { break; }
+      i = nl;
+      continue;
+    }
+    if (ch === '/' && next === '*') {
+      const end = text.indexOf('*/', i + 2);
+      if (end < 0) { break; }
+      i = end + 1;
+      continue;
+    }
+    if (ch === '"' || ch === "'") {
+      let j = i + 1;
+      while (j < close && text[j] !== ch) { j++; }
+      i = j;
+      continue;
+    }
+    if (ch === '(' || ch === '[' || ch === '{') {
+      depth++;
+    } else if (ch === ')' || ch === ']' || ch === '}') {
+      depth--;
+    } else if (ch === ',' && depth === 0) {
+      segments.push({ start, end: i });
+      start = i + 1;
+    }
+  }
+  segments.push({ start, end: close });
+
+  // 2) Read the key, the value and the comments of each entry
+  const members: StructMember[] = [];
+  for (const seg of segments) {
+    let pos = seg.start;
+
+    // A "// comment" on the same line as the previous comma documents the previous entry
+    const tail = /^[ \t]*\/\/([^\n]*)/.exec(text.slice(pos, seg.end));
+    if (tail && members.length) {
+      const prev = members[members.length - 1];
+      prev.doc = [prev.doc, tail[1].trim()].filter(Boolean).join('\n');
+      pos += tail[0].length;
+    }
+
+    // Comments that come before the key
+    const leading: string[] = [];
+    for (;;) {
+      pos += /^\s*/.exec(text.slice(pos, seg.end))![0].length;
+      if (text.startsWith('//', pos)) {
+        const nl = text.indexOf('\n', pos);
+        const lineEnd = nl < 0 || nl > seg.end ? seg.end : nl;
+        leading.push(text.slice(pos, lineEnd).replace(/^\/\/+\s?/, '').trim());
+        pos = lineEnd;
+        continue;
+      }
+      if (text.startsWith('/*', pos)) {
+        const end = text.indexOf('*/', pos + 2);
+        if (end < 0 || end + 2 > seg.end) { break; }
+        const d = parseDoc(text.slice(pos, end + 2)).description;
+        if (d) { leading.push(d); }
+        pos = end + 2;
+        continue;
+      }
+      break;
+    }
+
+    const code = text.slice(pos, seg.end);
+    const km = /^(?:"([^"]+)"|'([^']+)'|([A-Za-z_]\w*))\s*[:=]\s*/.exec(code);
+    if (!km) { continue; }
+    const name = km[1] ?? km[2] ?? km[3];
+    const valueStart = pos + km[0].length;
+    const valueText = text.slice(valueStart, seg.end);
+    const first = splitTrailingComment(valueText.split('\n')[0].replace(/\r$/, ''));
+
+    const member: StructMember = {
+      name,
+      offset: pos + km[0].indexOf(name),
+      value: first.code.trim() || undefined,
+      doc: [leading.filter(Boolean).join('\n'), first.comment].filter(Boolean).join('\n').trim()
+    };
+
+    // Nested struct literal
+    if (valueText.trimStart().startsWith('{')) {
+      const nestedOpen = valueStart + valueText.indexOf('{');
+      const nestedClose = findBodyEnd(text, nestedOpen);
+      if (nestedClose > 0 && nestedClose <= seg.end) {
+        const nested = parseStructLiteral(text, nestedOpen, nestedClose);
+        if (nested.length) { member.members = nested; }
+      }
+    }
+    members.push(member);
+  }
+  return members;
+}
+
+/**
+ * Parses the struct literal that a declaration assigns, when the value starts with "{".
+ * @param text - Source code of the file.
+ * @param lineOffset - Offset of the start of the line.
+ * @param line - The line that contains the "=" and the opening "{".
+ * @returns The members, or undefined when the value is not a struct literal.
+ */
+function literalMembers(text: string, lineOffset: number, line: string): StructMember[] | undefined {
+  const eq = line.indexOf('=');
+  if (eq < 0) { return undefined; }
+  const brace = line.indexOf('{', eq);
+  if (brace < 0 || line.slice(eq + 1, brace).trim() !== '') { return undefined; }
+  const open = lineOffset + brace;
+  const close = findBodyEnd(text, open);
+  if (close < 0) { return undefined; }
+  const members = parseStructLiteral(text, open, close);
+  return members.length ? members : undefined;
+}
+
+/**
  * Finds the variables of a file: scoped assignments, `var` declarations, unscoped assignments,
  * `property`, `<cfproperty>`, `<cfparam>` and `<cfset>`.
  * The comment above a declaration, or at the end of its line, is used as its documentation.
@@ -639,7 +783,8 @@ export function parseVariables(text: string): VarInfo[] {
         scope: 'local', name: vm[2], kind: 'var', type: vm[1],
         value: value || undefined,
         doc: [buffer.join('\n'), comment].filter(Boolean).join('\n').trim(),
-        offset: offsets[i]
+        offset: offsets[i],
+        members: literalMembers(text, offsets[i], line)
       });
       buffer = [];
       continue;
@@ -655,7 +800,22 @@ export function parseVariables(text: string): VarInfo[] {
         kind: 'assignment',
         value: code.trim().replace(/;\s*$/, ''),
         doc: [buffer.join('\n'), comment].filter(Boolean).join('\n').trim(),
-        offset: offsets[i]
+        offset: offsets[i],
+        members: literalMembers(text, offsets[i], line)
+      });
+      buffer = [];
+      continue;
+    }
+
+    // config = {  (unscoped multi-line struct literal)
+    const sm = line.match(/^\s*(\w+)\s*=(?!=)\s*\{[^;]*$/);
+    if (sm) {
+      vars.push({
+        scope: 'variables', name: sm[1], kind: 'assignment', bare: true,
+        value: '{ ... }',
+        doc: buffer.join('\n').trim(),
+        offset: offsets[i],
+        members: literalMembers(text, offsets[i], line)
       });
       buffer = [];
       continue;
@@ -694,6 +854,9 @@ export function parseVariables(text: string): VarInfo[] {
     }
 
     buffer = [];
+  }
+  for (const v of vars) {
+    if (v.members && v.value === '{') { v.value = '{ ... }'; }
   }
   return vars;
 }
@@ -1530,6 +1693,458 @@ export async function includedEntries(
 }
 
 // ---------------------------------------------------------------------------
+// Struct members: comments on the keys of a struct literal
+// ---------------------------------------------------------------------------
+/** A struct member that was found, with the variable and the path of keys that lead to it. */
+interface MemberHit {
+  /** The member. */
+  member: StructMember;
+  /** The variable that holds the struct. */
+  owner: VarInfo;
+  /** Keys that lead from the variable to the member, the member included. */
+  path: string[];
+}
+
+/**
+ * Finds the struct member whose key is at the given offset of the file.
+ * @param vars - Variables of the file.
+ * @param offset - Offset of the cursor.
+ * @returns The member, or undefined when the cursor is not on a key.
+ */
+function findMemberAt(vars: VarInfo[], offset: number): MemberHit | undefined {
+  const walk = (members: StructMember[], path: string[]): { member: StructMember; path: string[] } | undefined => {
+    for (const m of members) {
+      if (offset >= m.offset && offset <= m.offset + m.name.length) {
+        return { member: m, path: [...path, m.name] };
+      }
+      const nested = m.members ? walk(m.members, [...path, m.name]) : undefined;
+      if (nested) { return nested; }
+    }
+    return undefined;
+  };
+  for (const v of vars) {
+    const hit = v.members ? walk(v.members, []) : undefined;
+    if (hit) { return { ...hit, owner: v }; }
+  }
+  return undefined;
+}
+
+/**
+ * Finds a member by following a path of key names (case-insensitive).
+ * @param members - Members where the search starts.
+ * @param path - Names of the keys to follow.
+ * @returns The member at the end of the path, or undefined.
+ */
+function findMemberByPath(members: StructMember[] | undefined, path: string[]): StructMember | undefined {
+  let list = members;
+  let found: StructMember | undefined;
+  for (const name of path) {
+    found = list?.find(m => m.name.toLowerCase() === name.toLowerCase());
+    if (!found) { return undefined; }
+    list = found.members;
+  }
+  return found;
+}
+
+/**
+ * Builds the hover of a struct member.
+ * @param hit - The member and the path that leads to it.
+ * @param fileLabel - Relative path of the file, when the member comes from another file.
+ * @returns The markdown of the hover.
+ */
+function toMarkdownMember(hit: MemberHit, fileLabel?: string): vscode.MarkdownString {
+  const { member, owner, path } = hit;
+  const prefix = owner.bare || owner.kind === 'var' ? '' : `${owner.scope}.`;
+  const value = member.value && member.value.length > 120 ? member.value.slice(0, 117) + '...' : member.value;
+  const md = new vscode.MarkdownString();
+  md.appendCodeblock(`${prefix}${owner.name}.${path.join('.')}${value ? ` = ${value}` : ''}`, codeLanguage());
+  if (member.doc) { md.appendMarkdown(member.doc + '\n'); }
+  if (fileLabel) { md.appendMarkdown(`\n---\n*${fileLabel}*`); }
+  return md;
+}
+
+// ---------------------------------------------------------------------------
+// Parents of an included template: the files that include the current file
+// ---------------------------------------------------------------------------
+/** Pattern of the files that can contain includes. */
+const TEMPLATE_GLOB = '**/*.{cfm,cfc,cfml,cfinc,inc}';
+
+/** Raw includes of each template of the workspace, keyed by URI. It is used to find the files that include a file. */
+const includeIndex = new Map<string, { uri: vscode.Uri; refs: string[] }>();
+/** Changes every time the include index changes. It invalidates the cached lookups. */
+let includeIndexVersion = 0;
+/** Files that include a file, keyed by the URI of the included file. */
+const includersCache = new Map<string, { version: number; uris: vscode.Uri[] }>();
+/** Pending or finished scan of the workspace. */
+let includeIndexReady: Promise<unknown> | undefined;
+
+/**
+ * Tells whether the files that include the current file are searched.
+ * @returns The value of the `includes.searchParents` setting.
+ */
+function searchParentsEnabled(): boolean {
+  return vscode.workspace.getConfiguration('cfscriptDocblockHover').get<boolean>('includes.searchParents', true);
+}
+
+/**
+ * Runs a task for each item, a few at a time.
+ * @param items - Items to process.
+ * @param limit - Maximum number of tasks that run at the same time.
+ * @param task - Task to run for each item.
+ */
+async function forEachLimit<T>(items: T[], limit: number, task: (item: T) => Promise<void>): Promise<void> {
+  /** Position of the next item to process. */
+  let next = 0;
+  const workers = Array.from({ length: Math.min(limit, items.length) }, async () => {
+    while (next < items.length) {
+      const item = items[next++];
+      await task(item);
+    }
+  });
+  await Promise.all(workers);
+}
+
+/**
+ * Reads a template and stores the includes it contains.
+ * @param uri - The template.
+ */
+export async function indexTemplateIncludes(uri: vscode.Uri): Promise<void> {
+  try {
+    const bytes = await vscode.workspace.fs.readFile(uri);
+    const refs = parseIncludes(Buffer.from(bytes).toString('utf8'));
+    if (refs.length) {
+      includeIndex.set(uri.toString(), { uri, refs });
+    } else {
+      includeIndex.delete(uri.toString());
+    }
+  } catch {
+    includeIndex.delete(uri.toString());
+  }
+  includeIndexVersion++;
+}
+
+/**
+ * Forgets the includes of a template that was deleted.
+ * @param uri - The template.
+ */
+export function removeTemplateIncludes(uri: vscode.Uri): void {
+  includeIndex.delete(uri.toString());
+  includeIndexVersion++;
+}
+
+/**
+ * Scans the workspace once and stores the includes of every template.
+ * @returns A promise that is resolved when the scan has finished.
+ */
+export function ensureIncludeIndex(): Promise<unknown> {
+  includeIndexReady ??= Promise.resolve(vscode.workspace.findFiles(TEMPLATE_GLOB, '**/node_modules/**'))
+    .then((uris: vscode.Uri[]) => forEachLimit(uris, 40, indexTemplateIncludes))
+    .catch(() => undefined);
+  return includeIndexReady;
+}
+
+/**
+ * Finds the files that include a file.
+ * Only the includes whose last path segment is the name of the file are resolved.
+ * @param target - The included file.
+ * @returns The files that include it.
+ */
+export async function findIncluders(target: vscode.Uri): Promise<vscode.Uri[]> {
+  await ensureIncludeIndex();
+  const key = target.toString();
+  const cached = includersCache.get(key);
+  if (cached && cached.version === includeIndexVersion) { return cached.uris; }
+
+  const fileName = target.path.slice(target.path.lastIndexOf('/') + 1).toLowerCase();
+  const uris: vscode.Uri[] = [];
+  for (const { uri, refs } of includeIndex.values()) {
+    for (const ref of refs) {
+      if (ref.slice(ref.lastIndexOf('/') + 1).toLowerCase() !== fileName) { continue; }
+      const resolved = await resolveInclude(ref, uri);
+      if (resolved && resolved.toString() === key) {
+        uris.push(uri);
+        break;
+      }
+    }
+  }
+  includersCache.set(key, { version: includeIndexVersion, uris });
+  return uris;
+}
+
+/**
+ * Collects the files whose variables and functions are visible from a file because of includes:
+ * the files it includes and, going up, the files that include it together with the other files
+ * that those include. For example, if main.cfm includes app.cfm and layout.cfm, and layout.cfm
+ * includes home.cfm, then home.cfm sees what is defined in layout.cfm, in main.cfm and in app.cfm.
+ * @param entry - The file.
+ * @param searchParents - Whether to search the files that include the file.
+ * @returns The related files, nearest first.
+ */
+export async function includeContext(entry: IndexEntry, searchParents = true): Promise<IndexEntry[]> {
+  const out: IndexEntry[] = [];
+  /** URIs already added, so no file appears twice. */
+  const seen = new Set<string>([entry.uri.toString()]);
+  const add = (e: IndexEntry): void => {
+    if (!seen.has(e.uri.toString())) {
+      seen.add(e.uri.toString());
+      out.push(e);
+    }
+  };
+
+  for (const e of await includedEntries(entry)) { add(e); }
+  if (!searchParents) { return out; }
+
+  /** Files whose parents are searched at this level. */
+  let level: IndexEntry[] = [entry];
+  for (let depth = 0; depth < MAX_INCLUDE_DEPTH && level.length; depth++) {
+    const next: IndexEntry[] = [];
+    for (const child of level) {
+      for (const parentUri of (await findIncluders(child.uri)).slice(0, 5)) {
+        if (seen.has(parentUri.toString())) { continue; }
+        const parent = await getFileEntry(parentUri);
+        if (!parent) { continue; }
+        add(parent);
+        for (const sibling of await includedEntries(parent)) { add(sibling); }
+        next.push(parent);
+      }
+    }
+    level = next;
+  }
+  return out;
+}
+
+// ---------------------------------------------------------------------------
+// Signature help: parameter hints while a call is being typed
+// ---------------------------------------------------------------------------
+/** Describes the call that surrounds the cursor. */
+export interface CallContext {
+  /** Name of the function that is being called. */
+  name: string;
+  /** Component path, when the call is `new Path(...)`. */
+  newRef?: string;
+  /** What comes before the name, such as `this.` or `obj.`. It is empty for a plain call. */
+  qualifier: string;
+  /** Index of the argument under the cursor, counting from 0. */
+  argIndex: number;
+  /** Name of the argument under the cursor, in a named argument such as `id = 5`. */
+  argName?: string;
+}
+
+/**
+ * Finds the call whose parentheses contain the cursor.
+ * @param before - Source code from the start of the file up to the cursor.
+ * @returns The call, or undefined when the cursor is not inside the arguments of a call.
+ */
+export function findCallContext(before: string): CallContext | undefined {
+  /** Open brackets, with the commas found so far and where the current argument starts. */
+  const stack: { ch: string; pos: number; commas: number; argStart: number }[] = [];
+  for (let i = 0; i < before.length; i++) {
+    const ch = before[i];
+    const next = before[i + 1];
+    if (ch === '/' && next === '/') {
+      const nl = before.indexOf('\n', i);
+      if (nl < 0) { return undefined; }
+      i = nl;
+      continue;
+    }
+    if (ch === '/' && next === '*') {
+      const end = before.indexOf('*/', i + 2);
+      if (end < 0) { return undefined; }
+      i = end + 1;
+      continue;
+    }
+    if (ch === '"' || ch === "'") {
+      let j = i + 1;
+      while (j < before.length && before[j] !== ch) { j++; }
+      if (j >= before.length) { break; }
+      i = j;
+      continue;
+    }
+    if (ch === '(' || ch === '[' || ch === '{') {
+      stack.push({ ch, pos: i, commas: 0, argStart: i + 1 });
+    } else if (ch === ')' || ch === ']' || ch === '}') {
+      stack.pop();
+    } else if (ch === ',' && stack.length) {
+      const top = stack[stack.length - 1];
+      top.commas++;
+      top.argStart = i + 1;
+    }
+  }
+
+  for (let k = stack.length - 1; k >= 0; k--) {
+    const open = stack[k];
+    if (open.ch !== '(') { continue; }
+    const head = before.slice(0, open.pos);
+    if (/\bfunction\s+\w+\s*$/i.test(head)) { return undefined; }
+
+    let name: string;
+    let qualifier = '';
+    let newRef: string | undefined;
+    const nm = /\bnew\s+([A-Za-z_][\w.]*)\s*$/i.exec(head);
+    if (nm) {
+      newRef = nm[1];
+      name = nm[1].split('.').pop() as string;
+    } else {
+      const m = /([A-Za-z_]\w*)\s*$/.exec(head);
+      if (!m) { return undefined; }
+      name = m[1];
+      const q = /([A-Za-z_][\w.]*\.)$/.exec(head.slice(0, head.length - m[0].length));
+      qualifier = q ? q[1] : '';
+    }
+    if (NOT_FUNCTIONS.has(name.toLowerCase())) { return undefined; }
+
+    const named = /^\s*(\w+)\s*[=:](?![=:])/.exec(before.slice(open.argStart));
+    return { name, newRef, qualifier, argIndex: open.commas, argName: named ? named[1] : undefined };
+  }
+  return undefined;
+}
+
+/** A parameter of a signature. */
+interface ParamSig {
+  /** Text shown for the parameter, such as `id: numeric`. */
+  label: string;
+  /** Name of the parameter. */
+  name: string;
+  /** Description of the parameter. */
+  doc?: string;
+}
+
+/** What is needed to show the signature of a function. */
+export interface SignatureSource {
+  /** Name shown before the parentheses. */
+  name: string;
+  /** Parameters, in order. */
+  params: ParamSig[];
+  /** Return type, when known. */
+  returns?: string;
+  /** Description of the function. */
+  doc?: string;
+  /** Relative path of the file where it is defined, when it is not the current one. */
+  file?: string;
+}
+
+/**
+ * Converts a function of the source code into a signature source.
+ * @param f - The function.
+ * @param file - Relative path of its file, when it is not the current one.
+ * @param name - Name to show, when it is not the name of the function.
+ * @returns The signature source.
+ */
+function sourceFromFunction(f: FuncInfo, file?: string, name?: string): SignatureSource {
+  return {
+    name: name ?? f.name,
+    params: f.args.map(a => ({ label: formatArg(a), name: a.name, doc: f.doc.params[a.name.toLowerCase()] })),
+    returns: name ? undefined : f.returnType,
+    doc: f.doc.description,
+    file
+  };
+}
+
+/**
+ * Converts a CFDocs entry into a signature source.
+ * @param e - The entry.
+ * @returns The signature source.
+ */
+function sourceFromCfDocs(e: CfDocsEntry): SignatureSource {
+  return {
+    name: e.name,
+    params: (e.params ?? []).map(p => {
+      const values = (p.values ?? []).map(String).filter(Boolean);
+      const doc = [oneLine(p.description, 300), values.length ? `Values: ${values.slice(0, 10).join(' | ')}` : '']
+        .filter(Boolean).join(' ');
+      return { label: cfdocsParamLine(p), name: p.name, doc: doc || undefined };
+    }),
+    returns: e.returns || undefined,
+    doc: oneLine(e.description, 300) || undefined
+  };
+}
+
+/**
+ * Finds the definitions of the function that is being called.
+ * It looks in the current file, in the templates it includes or is included by, in the base
+ * components, in the other components of the workspace and, finally, in CFDocs.
+ * @param call - The call under the cursor.
+ * @param current - The current file.
+ * @returns The definitions found, nearest first.
+ */
+export async function resolveSignatures(call: CallContext, current: IndexEntry): Promise<SignatureSource[]> {
+  const rel = (u: vscode.Uri): string => vscode.workspace.asRelativePath(u);
+  const word = call.name.toLowerCase();
+
+  // new MyComponent(...): the constructor
+  if (call.newRef) {
+    await ensureIndex();
+    const out: SignatureSource[] = [];
+    for (const e of resolveComponents(call.newRef, current.uri, [current]).slice(0, 3)) {
+      const init = [e, ...inheritanceChain(e)].flatMap(x => x.funcs).find(f => f.name.toLowerCase() === 'init');
+      if (init) { out.push(sourceFromFunction(init, e.uri === current.uri ? undefined : rel(e.uri), `new ${uriBase(e.uri)}`)); }
+    }
+    return out;
+  }
+
+  const isSuper = /^super\.$/i.test(call.qualifier);
+  const own = !call.qualifier || isSuper || /^(this|variables)\.$/i.test(call.qualifier);
+
+  if (!isSuper) {
+    const local = current.funcs.filter(f => f.name.toLowerCase() === word);
+    if (local.length) { return local.map(f => sourceFromFunction(f)); }
+  }
+
+  if (own) {
+    if (!isSuper) {
+      for (const e of await includeContext(current, searchParentsEnabled())) {
+        const hits = e.funcs.filter(f => f.name.toLowerCase() === word);
+        if (hits.length) { return hits.slice(0, 3).map(f => sourceFromFunction(f, rel(e.uri))); }
+      }
+    }
+    await ensureIndex();
+    for (const e of inheritanceChain(current)) {
+      const hits = e.funcs.filter(f => f.name.toLowerCase() === word);
+      if (hits.length) { return hits.slice(0, 3).map(f => sourceFromFunction(f, rel(e.uri))); }
+    }
+  }
+
+  await ensureIndex();
+  const others: SignatureSource[] = [];
+  for (const e of index.values()) {
+    for (const f of e.funcs) {
+      if (f.name.toLowerCase() === word && f.hasDoc) { others.push(sourceFromFunction(f, rel(e.uri))); }
+    }
+  }
+  if (others.length) { return others.slice(0, 3); }
+
+  if (!call.qualifier && cfdocsSettings().enabled) {
+    const e = await getCfDocs(word);
+    if (e && e.type !== 'tag') { return [sourceFromCfDocs(e)]; }
+  }
+  return [];
+}
+
+/**
+ * Builds the signature that VS Code shows, with one range for each parameter so it can highlight them.
+ * @param src - The function to show.
+ * @returns The signature information.
+ */
+export function buildSignature(src: SignatureSource): vscode.SignatureInformation {
+  let label = `${src.name}(`;
+  /** Position of each parameter inside the label. */
+  const ranges: [number, number][] = [];
+  src.params.forEach((p, i) => {
+    if (i > 0) { label += ', '; }
+    ranges.push([label.length, label.length + p.label.length]);
+    label += p.label;
+  });
+  label += `)${src.returns ? `: ${src.returns}` : ''}`;
+
+  const docText = [src.doc, src.file ? `*${src.file}*` : ''].filter(Boolean).join('\n\n');
+  const sig = new vscode.SignatureInformation(label, docText ? new vscode.MarkdownString(docText) : undefined);
+  sig.parameters = src.params.map(
+    (p, i) => new vscode.ParameterInformation(ranges[i], p.doc ? new vscode.MarkdownString(p.doc) : undefined)
+  );
+  return sig;
+}
+
+// ---------------------------------------------------------------------------
 // Workspace CFC index
 // ---------------------------------------------------------------------------
 /** Index of the workspace CFC files, keyed by URI. It is exported for tests. */
@@ -1582,6 +2197,14 @@ export function activate(context: vscode.ExtensionContext): void {
   watcher.onDidDelete(uri => index.delete(uri.toString()));
   context.subscriptions.push(watcher);
 
+  // Index of includes: it is used to find the files that include the current file
+  const templateWatcher = vscode.workspace.createFileSystemWatcher(TEMPLATE_GLOB);
+  templateWatcher.onDidChange(indexTemplateIncludes);
+  templateWatcher.onDidCreate(indexTemplateIncludes);
+  templateWatcher.onDidDelete(removeTemplateIncludes);
+  context.subscriptions.push(templateWatcher);
+  if (searchParentsEnabled()) { void ensureIncludeIndex(); }
+
   const selector: vscode.DocumentSelector = [
     { language: 'cfml' },
     { pattern: '**/*.{cfc,cfm,cfml}' }
@@ -1595,7 +2218,7 @@ export function activate(context: vscode.ExtensionContext): void {
     vscode.languages.registerHoverProvider(selector, {
       /**
        * Provides the hover for the word under the cursor.
-       * It tries, in order: components (new / extends), native tags and their attributes, scoped
+       * It tries, in order: struct keys, components (new / extends), native tags and their attributes, struct members, scoped
        * variables, scope names, local variables and parameters, bare variables, tags and statements
        * in cfscript, user functions, inherited methods and, finally, native functions from CFDocs.
        * @param document - The document being edited.
@@ -1614,6 +2237,18 @@ export function activate(context: vscode.ExtensionContext): void {
           component: parseComponent(text),
           includes: parseIncludes(text)
         };
+        /** Files related to this one by includes. They are computed once per hover, and only when needed. */
+        let includeCtx: Promise<IndexEntry[]> | undefined;
+        const context = (): Promise<IndexEntry[]> => (includeCtx ??= includeContext(current, searchParentsEnabled()));
+
+        // K) Key of a struct literal: hover on `dsn` in  variables.config = { dsn: "main" }
+        const memberHit = findMemberAt(vars, document.offsetAt(position));
+        if (memberHit) {
+          return new vscode.Hover(
+            toMarkdownMember(memberHit),
+            document.getWordRangeAtPosition(position, /[A-Za-z_]\w*/)
+          );
+        }
 
         // N) new MyComponent() / extends="app.models.Base"
         const wide = document.getWordRangeAtPosition(position, /[A-Za-z_][\w.]*/);
@@ -1672,6 +2307,66 @@ export function activate(context: vscode.ExtensionContext): void {
           }
         }
 
+        // M) Member of a struct variable: variables.config.dsn / config.dsn
+        if (!isCall && before.endsWith('.')) {
+          const chain = /((?:[A-Za-z_]\w*\.)+)$/.exec(before);
+          const parts = chain ? chain[1].slice(0, -1).split('.') : [];
+          const first = (parts[0] || '').toLowerCase();
+          const isScope = HOVER_SCOPES.includes(first);
+          if (parts.length && !(isScope && parts.length === 1)) {
+            const scope = isScope ? first : 'variables';
+            const rootName = (isScope ? parts[1] : parts[0]).toLowerCase();
+            const path = parts.slice(isScope ? 2 : 1);
+
+            /** Variables of a file that can be the root of the chain. */
+            const pick = (list: VarInfo[], isCurrent: boolean): VarInfo[] => {
+              if (scope === 'local') {
+                return isCurrent ? localVarsOf(list, fn).filter(v => v.name.toLowerCase() === rootName) : [];
+              }
+              if (!isScope) {
+                const locals = isCurrent ? localVarsOf(list, fn).filter(v => v.name.toLowerCase() === rootName) : [];
+                return [...locals, ...list.filter(v => v.kind !== 'var' && v.scope === 'variables' && v.name.toLowerCase() === rootName)];
+              }
+              return list.filter(v => varMatches(v, scope, rootName));
+            };
+            /** Looks for the member in the variables of a file. */
+            const tryVars = (list: VarInfo[], isCurrent: boolean, file?: string): vscode.Hover | undefined => {
+              for (const v of pick(list, isCurrent).sort(byDoc)) {
+                const parent = path.length ? findMemberByPath(v.members, path) : undefined;
+                const members = path.length ? parent?.members : v.members;
+                const m = members?.find(x => x.name.toLowerCase() === word);
+                if (m) {
+                  return new vscode.Hover(toMarkdownMember({ member: m, owner: v, path: [...path, m.name] }, file), range);
+                }
+              }
+              return undefined;
+            };
+
+            let found = tryVars(vars, true);
+            if (!found) {
+              for (const e of await context()) {
+                found = tryVars(e.vars, false, rel(e.uri));
+                if (found) { break; }
+              }
+            }
+            if (!found && (!isScope || scope === 'variables' || scope === 'this')) {
+              await ensureIndex();
+              for (const e of inheritanceChain(current)) {
+                found = tryVars(e.vars, false, rel(e.uri));
+                if (found) { break; }
+              }
+            }
+            if (!found && isScope && scope !== 'variables' && scope !== 'this' && scope !== 'local') {
+              await ensureIndex();
+              for (const e of index.values()) {
+                found = tryVars(e.vars, false, rel(e.uri));
+                if (found) { break; }
+              }
+            }
+            if (found) { return found; }
+          }
+        }
+
         // A) Scoped variable: arguments.x, local.x, variables.x, this.x, application.x ...
         const sm = before.match(new RegExp(`\\b(${HOVER_SCOPES.join('|')})\\.$`, 'i'));
         if (sm && !isCall) {
@@ -1696,7 +2391,7 @@ export function activate(context: vscode.ExtensionContext): void {
 
           // Variables defined in templates included by this file (include "a.cfm";)
           if (scope !== 'local') {
-            for (const e of await includedEntries(current)) {
+            for (const e of await context()) {
               const hits = e.vars.filter(v => varMatches(v, scope, word)).sort(byDoc);
               if (hits.length) {
                 return new vscode.Hover(hits.slice(0, 3).map(v => toMarkdownVar(v, scope, rel(e.uri))), range);
@@ -1755,7 +2450,7 @@ export function activate(context: vscode.ExtensionContext): void {
           if (own.length) {
             return new vscode.Hover(own.slice(0, 3).map(v => toMarkdownVar(v, 'variables')), range);
           }
-          for (const e of await includedEntries(current)) {
+          for (const e of await context()) {
             const hits = e.vars
               .filter(v => v.kind !== 'var' && v.scope === 'variables' && v.name.toLowerCase() === word)
               .sort(byDoc);
@@ -1802,7 +2497,7 @@ export function activate(context: vscode.ExtensionContext): void {
         // Functions defined in templates included by this file
         if (own && !isSuper) {
           const fromIncludes: vscode.MarkdownString[] = [];
-          for (const e of await includedEntries(current)) {
+          for (const e of await context()) {
             for (const f of e.funcs) {
               if (f.name.toLowerCase() === word) { fromIncludes.push(toMarkdown(f, rel(e.uri))); }
             }
@@ -1843,6 +2538,46 @@ export function activate(context: vscode.ExtensionContext): void {
         return undefined;
       }
     })
+  );
+
+  context.subscriptions.push(
+    vscode.languages.registerSignatureHelpProvider(
+      selector,
+      {
+        /**
+         * Provides the signature of the function that is being called, with the parameter under
+         * the cursor highlighted. VS Code shows it when "(" or "," is typed.
+         * @param document - The document being edited.
+         * @param position - The cursor position.
+         * @returns The signature help, or undefined when the cursor is not inside a call.
+         */
+        async provideSignatureHelp(document, position) {
+          const call = findCallContext(document.getText(new vscode.Range(new vscode.Position(0, 0), position)));
+          if (!call) { return undefined; }
+
+          const text = document.getText();
+          const current: IndexEntry = {
+            uri: document.uri,
+            funcs: parseFunctions(text),
+            vars: [],
+            component: parseComponent(text),
+            includes: parseIncludes(text)
+          };
+          const sources = await resolveSignatures(call, current);
+          if (!sources.length) { return undefined; }
+
+          const help = new vscode.SignatureHelp();
+          help.signatures = sources.map(buildSignature);
+          help.activeSignature = 0;
+          const byName = call.argName
+            ? sources[0].params.findIndex(p => p.name.toLowerCase() === (call.argName as string).toLowerCase())
+            : -1;
+          help.activeParameter = byName >= 0 ? byName : call.argIndex;
+          return help;
+        }
+      },
+      { triggerCharacters: ['(', ','], retriggerCharacters: [','] }
+    )
   );
 }
 
